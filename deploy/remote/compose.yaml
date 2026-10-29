@@ -3,6 +3,7 @@ services:
     build:
       context: ../..
       dockerfile: deploy/remote/Dockerfile
+      target: ${OBSIDIAN_IMAGE_TARGET:-final}
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
     ports:
@@ -13,6 +14,9 @@ services:
       OBSIDIAN_OAUTH_AUDIENCE: ${OBSIDIAN_OAUTH_AUDIENCE:?Set the access-token audience}
       OBSIDIAN_OAUTH_SUBJECTS: ${OBSIDIAN_OAUTH_SUBJECTS:?Allow your own subject ID}
       OBSIDIAN_TOOLS: ${OBSIDIAN_TOOLS:-!open_in_obsidian}
+      OBSIDIAN_SYNC_MODE: ${OBSIDIAN_SYNC_MODE:-disabled}
+      OBSIDIAN_SYNC_TIMEOUT_SECS: ${OBSIDIAN_SYNC_TIMEOUT_SECS:-90}
+      OBSIDIAN_SYNC_READ_TTL_MS: ${OBSIDIAN_SYNC_READ_TTL_MS:-0}
       TZ: ${TZ:-America/Halifax}
     volumes:
       - type: bind

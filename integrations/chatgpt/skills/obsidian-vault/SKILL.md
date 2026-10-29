@@ -35,3 +35,11 @@ Use only authorized notes and changes. No extra confirmation is needed for a
 change the user has already requested. Explain the concrete scope before
 performing an ambiguous bulk change or deletion. Never request the user's
 Obsidian Sync password or ask them to paste OAuth tokens into chat.
+
+If sync_status reports managed mode, reads already synchronize and writes sync
+before and after the local edit. Do not add redundant sync_now calls around
+every operation. A successful local write may include an upload-pending warning.
+Report that state and retry only sync_now; never repeat the mutation to retry
+an upload. A pre-sync failure means the requested operation did not start.
+Sync is bidirectional housekeeping and may upload existing local edits even
+when the requested operation only reads.

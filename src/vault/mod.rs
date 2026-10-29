@@ -52,6 +52,7 @@ type EmbeddingLoaderFuture = ();
 
 /// Internal shared state wrapped in `Arc` for cheap cloning.
 struct VaultInner {
+    headless_sync: Option<Arc<crate::headless_sync::SyncCoordinator>>,
     root: PathBuf,
     mcp_home: PathBuf,
     mcp_data: PathBuf,
@@ -188,6 +189,16 @@ impl Vault {
         }
 
         let vi = VaultIndex::build(&root, Arc::clone(&exclude)).await?;
+        let headless_sync = crate::headless_sync::SyncConfig::from_env()
+            .map_err(VaultError::Other)?
+            .map(|settings| {
+                Arc::new(crate::headless_sync::SyncCoordinator::new(
+                    settings,
+                    root.clone(),
+                    &mcp_data,
+                    &mcp_home,
+                ))
+            });
 
         let tantivy = if config.tantivy {
             let tv = TantivyIndex::build(&root, vi.notes())?;
@@ -255,6 +266,7 @@ impl Vault {
 
         Ok(Self {
             inner: Arc::new(VaultInner {
+                headless_sync,
                 root,
                 mcp_home,
                 mcp_data,
@@ -302,6 +314,50 @@ impl Vault {
     /// Vault root path (canonicalized).
     pub fn root(&self) -> &Path {
         &self.inner.root
+    }
+
+    pub fn headless_sync(&self) -> Option<&Arc<crate::headless_sync::SyncCoordinator>> {
+        self.inner.headless_sync.as_ref()
+    }
+
+    /// Explicit barrier after a one-shot sync; do not rely on watcher debounce.
+    pub async fn refresh_after_sync(&self) -> VaultResult<()> {
+        let vault = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _mutation = vault.lock_mutations()?;
+            let mut index = vault.write_index();
+            let fresh = VaultIndex::build_sync(&vault.inner.root, &vault.inner.exclude)?;
+            if let Some(tv) = &vault.inner.tantivy {
+                for path in index
+                    .notes()
+                    .keys()
+                    .filter(|path| !fresh.notes().contains_key(*path))
+                {
+                    tv.remove_file_batch(path)?;
+                }
+                for (path, note) in fresh.notes() {
+                    tv.reindex_file_batch(&vault.inner.root, path, note)?;
+                }
+                tv.flush()?;
+            }
+            #[cfg(has_embeddings)]
+            if let Some(runtime) = &vault.inner.embedding_runtime {
+                for path in index
+                    .notes()
+                    .keys()
+                    .filter(|path| !fresh.notes().contains_key(*path))
+                {
+                    runtime.submit_remove(path);
+                }
+                for path in fresh.notes().keys() {
+                    runtime.submit_upsert(path);
+                }
+            }
+            *index = fresh;
+            Ok(())
+        })
+        .await
+        .map_err(|error| VaultError::Other(format!("Sync index-refresh task failed: {error}")))?
     }
 
     /// Always `{vault_root}/.obsidian-mcp`. Auto-created on startup.

@@ -61,3 +61,22 @@ Docker image build, real identity-provider discovery/login, Funnel routing,
 ChatGPT installation and iPhone behavior have not been exercised. The all-features
 local embedding/model-download matrix was not run. These are deployment/CI
 follow-ups, not established successes. No personal vault content was accessed.
+
+## Managed Headless Sync follow-up
+
+Added an opt-in service-owned one-shot coordinator and eight regression tests:
+seven unit tests covering download/index barriers, forced write passes and read
+TTL, serialized cross-process transactions, pre-sync/configuration failure,
+post-write failure/restart recovery, timeout, revision conflicts and cancellation;
+one HTTP wire test exercises actual tool wrapping, managed annotations and
+pending-upload recovery. OAuth tests also check sync_now needs write scope.
+
+Validation after this addition: 641 library tests pass with the same 17 socket
+tests filtered; all 60 integration tests and 13 transport tests pass with the
+same process-stop test filtered. Formatting, normal Clippy, optional
+embeddings-api compilation and both packaging tests pass. Tool schemas include
+the two added sync tools. Tests use a fake executable rather than an Obsidian
+account. The official CLI source/README (0.0.14) was inspected for command syntax,
+configuration modes and locking; live Headless Sync, the optional Node container
+image and homelab deployment remain untested. No personal credentials or vault
+contents were accessed.

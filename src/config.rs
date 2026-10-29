@@ -143,6 +143,8 @@ pub struct Config {
 // ── Tool Filtering ─────────────────────────────────────────────────
 
 pub const ALL_TOOL_NAMES: &[&str] = &[
+    "sync_status",
+    "sync_now",
     "vault_list",
     "note_read",
     "note_read_many",
@@ -183,6 +185,7 @@ const PROFILE_CORE: &[&str] = &[
 ];
 
 const PROFILE_READ: &[&str] = &[
+    "sync_status",
     "note_read",
     "note_read_many",
     "vault_list",

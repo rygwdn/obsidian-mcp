@@ -502,6 +502,24 @@ mod tests {
     #[tokio::test]
     async fn enforces_scope_and_revision_on_every_request() {
         assert_eq!(
+            call("vault:read", "sync_now", serde_json::json!({}))
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call("vault:read", "sync_status", serde_json::json!({}))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            call("vault:read vault:write", "sync_now", serde_json::json!({}))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
             call(
                 "vault:read",
                 "note_write",

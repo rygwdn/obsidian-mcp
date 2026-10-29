@@ -202,3 +202,69 @@ Official integration references:
 - https://developers.openai.com/plugins/build/auth
 - https://developers.openai.com/plugins/deploy/connect-chatgpt
 - https://tailscale.com/docs/reference/tailscale-cli/funnel
+
+
+## Optional service-managed Headless Sync
+
+Set `OBSIDIAN_SYNC_MODE=managed` to run the official CLI before every vault read,
+search, graph, metadata or periodic-note operation, and before **and after** each
+mutation. The CLI has no lightweight remote-change probe; each barrier runs
+`ob sync-status --path <vault> --json` to validate bidirectional configuration,
+then a one-shot `ob sync --path <vault>`. It never uses `--continuous`.
+`sync_status` reports health without contacting Sync; `sync_now` forces a pass.
+Disabled mode (default) leaves sync ownership with your existing service.
+
+Stop your existing continuous-sync service **before enabling managed mode**.
+The MCP service serializes its own complete sync/operation/sync transactions,
+including across processes sharing the same vault path. Obsidian's CLI lock
+protects against other sync processes; a collision fails the operation. It
+never kills your other service or deletes its lock. Other Obsidian clients may
+still edit concurrently, so normal Sync conflict handling and revision checks
+remain necessary; this is not a distributed transaction.
+
+For the supplied container:
+
+1. Set `OBSIDIAN_IMAGE_TARGET=managed-sync` and `OBSIDIAN_SYNC_MODE=managed` in
+   `.env`. This optional image installs Node 22 and `obsidian-headless@0.0.14`.
+2. Stop the old sync process, then run `docker compose build` from `deploy/remote`.
+3. Authenticate interactively with
+   `docker compose run --rm --entrypoint ob obsidian-mcp login`.
+4. Run `docker compose run --rm --entrypoint ob obsidian-mcp sync-list-remote`,
+   then `docker compose run --rm --entrypoint ob obsidian-mcp sync-setup --vault <REMOTE_ID> --path /vault`.
+   Follow CLI prompts on your own terminal. Never paste credentials into chat.
+   Run setup inside this container: host-path configuration does not identify
+   the container's `/vault` path. Confirm the chosen remote and existing local
+   vault match before setup.
+5. Verify `docker compose run --rm --entrypoint ob obsidian-mcp sync-status --path /vault --json`
+   shows `bidirectional`, and run one manual `sync --path /vault` before
+   `docker compose up -d`.
+
+CLI authentication/configuration persists under `/data/config/obsidian-headless`.
+Protect this directory as a secret and keep it out of the vault and Git. The
+existing data bind mount must be writable by PUID/PGID; credentials are not
+included in the image. Do not run a separate scheduler against this same vault.
+For a native installation, install Node >=22 and the official CLI, authenticate
+and set up the exact vault path as the service OS user. Set
+`OBSIDIAN_HEADLESS_BIN` if `ob` is not on that user's PATH.
+
+The default `OBSIDIAN_SYNC_READ_TTL_MS=0` checks every read. Optionally set up to
+60000 ms to reuse a recent successful barrier for reads; writes always force
+both passes. Batch reads reduce sync overhead. `OBSIDIAN_SYNC_TIMEOUT_SECS`
+defaults to 90 (range 1–3600), applied per CLI command and coordinator lock wait.
+Subprocess input is closed and output suppressed to avoid leaking credentials
+or note paths. Login/setup are separate interactive administrative operations.
+
+A failed pre-sync blocks the operation. A failed post-sync returns the local
+write result with an explicit **upload pending; do not repeat the write**
+warning. A persistent marker survives restarts; use `sync_status` and retry
+`sync_now` to upload it. Cancellation during a write also leaves the marker.
+This marker conservatively means a mutation may need uploading, not a precise
+remote queue count. A successful sync clears it. Disk content, tags, backlinks
+and BM25 search are refreshed before the operation proceeds; semantic embedding
+updates remain asynchronous. Each real pass scans/reindexes the vault, so large
+vaults may benefit from batch reads or the optional read TTL.
+
+Managed read calls can upload pre-existing local changes because sync is
+bidirectional. Tool annotations reflect this external write behavior. OAuth
+`vault:read` still limits requested note operations; it does not make underlying
+Sync housekeeping download-only. `sync_now` requires `vault:write` remotely.

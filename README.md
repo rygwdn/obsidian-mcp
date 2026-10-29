@@ -29,7 +29,7 @@ obsidian-mcp /path/to/your/vault
 obsidian-mcp --http /path/to/your/vault
 ```
 
-Add to your MCP client config (Cursor, Claude Desktop, etc.) and you're done — 19 tools are available immediately.
+Add to your MCP client config (Cursor, Claude Desktop, etc.) and you're done — 21 tools are available immediately.
 
 ## What It Can Do
 
@@ -520,7 +520,7 @@ Always available. Full regex syntax for pattern matching across all notes.
 ## Tool Reference
 
 <details>
-<summary><strong>All 19 tools</strong> (click to expand)</summary>
+<summary><strong>All 21 tools</strong> (click to expand)</summary>
 
 ### Navigation
 
@@ -586,6 +586,8 @@ For `note_patch` heading targets, bare heading text such as `"Log"` is canonical
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
+| `sync_status` | — | Inspect managed sync health without contacting Sync |
+| `sync_now` | — | Force one bidirectional sync and index refresh (managed mode only) |
 | `open_in_obsidian` | `path`, `new_leaf?` | Open note in Obsidian via `obsidian://` URI |
 
 </details>
@@ -598,9 +600,9 @@ For legacy HTTP sessions, send the header with `initialize`; that filter lasts f
 
 | Value | Effect |
 |-------|--------|
-| `full` (or unset) | All 19 tools |
-| `core` | 15 tools — drops `search_semantic`, `wikilinks`, `periodic`, `open_in_obsidian` |
-| `read` | 10 tools — read-only (excludes all mutation tools, including `frontmatter`) |
+| `full` (or unset) | All 21 tools |
+| `core` | 15 tools — drops `search_semantic`, `wikilinks`, `periodic`, `open_in_obsidian`, `sync_status`, `sync_now` |
+| `read` | 11 tools — read-only (excludes all mutation tools, including `frontmatter`) |
 | `minimal` | 6 tools — `vault_list`, `vault_info`, `note_read`, `note_create`, `note_write`, `search_text` |
 | `tool1,tool2,...` | Allow-list — only the named tools |
 | `!tool1,!tool2,...` | Deny-list — all tools except the named ones |
@@ -704,3 +706,13 @@ npx @modelcontextprotocol/inspector cargo run   # interactive testing (stdio)
 [MIT](LICENSE)
 
 For suspected vulnerabilities, follow the [security reporting policy](SECURITY.md).
+
+### Optional managed Obsidian Headless Sync
+
+Set `OBSIDIAN_SYNC_MODE=managed` to synchronize before vault operations and before
+and after writes. Adds `sync_status` (passive health) and `sync_now` (forced
+bidirectional pass). Stop any existing continuous-sync process first. See the
+[homelab guide](docs/chatgpt-homelab.md#optional-service-managed-headless-sync) for
+CLI installation, the optional container image, failure recovery and read TTL.
+Default mode is disabled. In managed mode even read operations can upload
+existing local edits as part of bidirectional sync.

@@ -54,13 +54,30 @@ impl HttpServer {
     }
 
     async fn start_on_host(filter: &str, host: &str) -> Self {
+        Self::start_configured(filter, host, None).await
+    }
+
+    async fn start_configured(filter: &str, host: &str, sync_script: Option<&str>) -> Self {
         let vault = temporary_vault();
+        #[cfg(unix)]
+        if let Some(script) = sync_script {
+            use std::os::unix::fs::PermissionsExt;
+            let executable = vault.path().join("fake-ob");
+            std::fs::write(&executable, format!("#!/bin/sh\nset -eu\n{script}")).unwrap();
+            std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         let port = TcpListener::bind((host, 0))
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
-        let child = server_command(&vault)
+        let mut command = server_command(&vault);
+        if sync_script.is_some() {
+            command
+                .env("OBSIDIAN_SYNC_MODE", "managed")
+                .env("OBSIDIAN_HEADLESS_BIN", vault.path().join("fake-ob"));
+        }
+        let child = command
             .args(["--http", "--host", host, "--port", &port.to_string()])
             .env("OBSIDIAN_TOOLS", filter)
             .spawn()
@@ -653,8 +670,9 @@ async fn advertised_schemas_match_results_and_annotations_over_http() {
     )
     .await;
     let tools = listing["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 19);
+    assert_eq!(tools.len(), 21);
     let readonly = [
+        "sync_status",
         "vault_list",
         "vault_info",
         "note_read",
@@ -692,17 +710,19 @@ async fn advertised_schemas_match_results_and_annotations_over_http() {
         );
         assert_eq!(
             tool["annotations"]["idempotentHint"],
-            readonly.contains(&name) || name == "note_write",
+            readonly.contains(&name) || matches!(name, "note_write" | "sync_now"),
             "{name}"
         );
         assert_eq!(
             tool["annotations"]["openWorldHint"],
-            name == "search_semantic",
+            matches!(name, "search_semantic" | "sync_now"),
             "{name}"
         );
     }
     let mut covered = std::collections::HashSet::new();
     for (name, arguments) in [
+        ("sync_status", json!({})),
+        ("sync_now", json!({})),
         ("vault_info", json!({})),
         ("vault_list", json!({"glob":"absent*"})),
         ("vault_list", json!({})),
@@ -781,7 +801,7 @@ async fn advertised_schemas_match_results_and_annotations_over_http() {
         validate_output(tool, &response["result"]);
         covered.insert(name);
     }
-    assert_eq!(covered.len(), 17); // Desktop launch and semantic inference require separate fixtures.
+    assert_eq!(covered.len(), 19); // Desktop launch and semantic inference require separate fixtures.
     for (name, arguments) in [
         ("note_read", json!({"path":"missing.md"})),
         (
@@ -901,4 +921,104 @@ async fn stop_uses_the_configured_ipv6_host_from_cli_and_environment() {
                 .is_err()
         );
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn managed_sync_wraps_real_mcp_calls_and_reports_pending_upload() {
+    let script = r#"
+if [ "$1" = sync-status ]; then printf '{"syncMode":"bidirectional"}'; exit; fi
+n=0; [ ! -f count ] || n=$(cat count)
+n=$((n+1)); printf '%s' "$n" > count
+[ ! -f fail ] || exit 7
+if [ "$n" = 1 ]; then printf 'downloaded note' > note.md; fi
+if [ "$n" = 3 ]; then touch fail; exit 7; fi
+"#;
+    let server = HttpServer::start_configured("full", "127.0.0.1", Some(script)).await;
+    let listing = rpc_response(
+        server
+            .request("tools/list", json!({}), MODERN)
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    let tool = listing["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "note_read")
+        .unwrap();
+    assert_eq!(tool["annotations"]["readOnlyHint"], false);
+    assert_eq!(tool["annotations"]["openWorldHint"], true);
+    let read = rpc_response(
+        server
+            .request(
+                "tools/call",
+                json!({"name":"note_read", "arguments":{"path":"note.md"}}),
+                MODERN,
+            )
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        read["result"]["structuredContent"]["content"],
+        "downloaded note"
+    );
+    let revision = &read["result"]["structuredContent"]["revision"];
+    let write = rpc_response(server.request("tools/call", json!({"name":"note_write", "arguments":{"path":"note.md", "content":"edited note", "expected_revision":revision}}), MODERN).send().await.unwrap()).await;
+    assert_ne!(write["result"]["isError"], true);
+    assert!(
+        write["result"]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|content| content["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("Do NOT repeat")))
+    );
+    assert_eq!(
+        std::fs::read_to_string(server.vault.path().join("count")).unwrap(),
+        "3"
+    );
+    let status = rpc_response(
+        server
+            .request(
+                "tools/call",
+                json!({"name":"sync_status", "arguments":{}}),
+                MODERN,
+            )
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status["result"]["structuredContent"]["pending_upload"],
+        true
+    );
+    std::fs::remove_file(server.vault.path().join("fail")).unwrap();
+    let retry = rpc_response(
+        server
+            .request(
+                "tools/call",
+                json!({"name":"sync_now", "arguments":{}}),
+                MODERN,
+            )
+            .send()
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        retry["result"]["structuredContent"]["pending_upload"],
+        false
+    );
+    assert_eq!(
+        std::fs::read_to_string(server.vault.path().join("note.md")).unwrap(),
+        "edited note"
+    );
+    server.stop().await;
 }

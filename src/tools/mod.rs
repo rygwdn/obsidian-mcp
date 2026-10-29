@@ -208,6 +208,20 @@ impl ObsidianMcp {
         disabled_tools: HashSet<String>,
     ) -> Self {
         let mut tool_router = Self::tool_router();
+        if vault.headless_sync().is_some() {
+            let mut managed = ToolRouter::new();
+            for mut route in tool_router {
+                if !matches!(route.attr.name.as_ref(), "sync_status" | "open_in_obsidian") {
+                    let annotations = route.attr.annotations.get_or_insert_with(Default::default);
+                    annotations.read_only_hint = Some(false);
+                    annotations.open_world_hint = Some(true);
+                    let description = route.attr.description.get_or_insert_with(Default::default);
+                    *description = format!("{description} Managed mode performs bidirectional Headless Sync before this operation and after writes.").into();
+                }
+                managed.add_route(route);
+            }
+            tool_router = managed;
+        }
         if !disabled_tools.is_empty() {
             tracing::info!(
                 count = disabled_tools.len(),
@@ -237,7 +251,8 @@ impl ObsidianMcp {
         &self,
         Parameters(params): Parameters<navigation::VaultListParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        navigation::vault_list(&self.vault, params)
+        self.with_sync(false, async { navigation::vault_list(&self.vault, params) })
+            .await
     }
 
     // ── Note CRUD ───────────────────────────────────────────────────
@@ -252,23 +267,27 @@ impl ObsidianMcp {
         &self,
         Parameters(params): Parameters<notes::NoteReadParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let content = notes::note_read(&self.vault, params).await?;
-        let revision = crate::vault::fs::revision(&content);
-        let mut result = output::with_text(
-            &output::RevisionedContent {
-                content: content.clone(),
-                revision: revision.clone(),
-            },
-            content,
-        )?;
-        result.content.push(rmcp::model::ContentBlock::text(format!(
-            "Revision (pass as expected_revision): {revision}"
-        )));
-        Ok(result)
+        self.with_sync(false, async {
+            let content = notes::note_read(&self.vault, params).await?;
+            let revision = crate::vault::fs::revision(&content);
+            let mut result = output::with_text(
+                &output::RevisionedContent {
+                    content: content.clone(),
+                    revision: revision.clone(),
+                },
+                content,
+            )?;
+            result.content.push(rmcp::model::ContentBlock::text(format!(
+                "Revision (pass as expected_revision): {revision}"
+            )));
+            Ok(result)
+        })
+        .await
     }
 
     #[tool(
         name = "note_read_many",
+        output_schema = schema_for_output::<notes::NoteReadManyOutput>(),
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -280,8 +299,12 @@ impl ObsidianMcp {
     async fn note_read_many(
         &self,
         Parameters(params): Parameters<notes::NoteReadManyParams>,
-    ) -> Result<Json<notes::NoteReadManyOutput>, ErrorData> {
-        notes::note_read_many(&self.vault, params).await
+    ) -> Result<CallToolResult, ErrorData> {
+        self.with_sync(false, async {
+            let Json(result) = notes::note_read_many(&self.vault, params).await?;
+            output::json(&result)
+        })
+        .await
     }
 
     #[tool(
@@ -294,7 +317,10 @@ impl ObsidianMcp {
         &self,
         Parameters(params): Parameters<notes::NoteCreateParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        output::message(notes::note_create(&self.vault, params).await?)
+        self.with_sync(true, async {
+            output::message(notes::note_create(&self.vault, params).await?)
+        })
+        .await
     }
 
     #[tool(
@@ -307,7 +333,10 @@ impl ObsidianMcp {
         &self,
         Parameters(params): Parameters<notes::NoteWriteParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        output::message(notes::note_write(&self.vault, params).await?)
+        self.with_sync(true, async {
+            output::message(notes::note_write(&self.vault, params).await?)
+        })
+        .await
     }
 
     #[tool(
@@ -322,7 +351,10 @@ impl ObsidianMcp {
         &self,
         Parameters(params): Parameters<notes::NoteInsertParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        output::message(notes::note_insert(&self.vault, params).await?)
+        self.with_sync(true, async {
+            output::message(notes::note_insert(&self.vault, params).await?)
+        })
+        .await
     }
 
     #[tool(
@@ -335,7 +367,10 @@ impl ObsidianMcp {
         &self,
         Parameters(params): Parameters<notes::NotePatchParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        output::message(notes::note_patch(&self.vault, params).await?)
+        self.with_sync(true, async {
+            output::message(notes::note_patch(&self.vault, params).await?)
+        })
+        .await
     }
 
     #[tool(
@@ -348,7 +383,10 @@ impl ObsidianMcp {
         &self,
         Parameters(params): Parameters<notes::NoteDeleteParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        output::message(notes::note_delete(&self.vault, params).await?)
+        self.with_sync(true, async {
+            output::message(notes::note_delete(&self.vault, params).await?)
+        })
+        .await
     }
 
     #[tool(
@@ -361,7 +399,10 @@ impl ObsidianMcp {
         &self,
         Parameters(params): Parameters<notes::NoteMoveParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        output::message(notes::note_move(&self.vault, params).await?)
+        self.with_sync(true, async {
+            output::message(notes::note_move(&self.vault, params).await?)
+        })
+        .await
     }
 
     // ── Search ──────────────────────────────────────────────────────
@@ -376,7 +417,10 @@ impl ObsidianMcp {
         &self,
         Parameters(params): Parameters<search::SearchTextParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        search::search_text(&self.vault, params).await
+        self.with_sync(false, async {
+            search::search_text(&self.vault, params).await
+        })
+        .await
     }
 
     #[tool(
@@ -389,7 +433,10 @@ impl ObsidianMcp {
         &self,
         Parameters(params): Parameters<search::SearchRegexParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        search::search_regex(&self.vault, params).await
+        self.with_sync(false, async {
+            search::search_regex(&self.vault, params).await
+        })
+        .await
     }
 
     #[tool(
@@ -402,7 +449,10 @@ impl ObsidianMcp {
         &self,
         Parameters(params): Parameters<search::SearchMetadataParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        search::search_metadata(&self.vault, params).await
+        self.with_sync(false, async {
+            search::search_metadata(&self.vault, params).await
+        })
+        .await
     }
 
     #[tool(
@@ -415,12 +465,15 @@ impl ObsidianMcp {
         &self,
         Parameters(params): Parameters<search::SearchSemanticParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        search::search_semantic(
-            &self.vault,
-            params,
-            self.hybrid_alpha,
-            &self.semantic_runtime,
-        )
+        self.with_sync(false, async {
+            search::search_semantic(
+                &self.vault,
+                params,
+                self.hybrid_alpha,
+                &self.semantic_runtime,
+            )
+            .await
+        })
         .await
     }
 
@@ -436,7 +489,10 @@ impl ObsidianMcp {
         &self,
         Parameters(params): Parameters<metadata::NoteInspectParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        metadata::note_inspect(&self.vault, params).await
+        self.with_sync(false, async {
+            metadata::note_inspect(&self.vault, params).await
+        })
+        .await
     }
 
     #[tool(
@@ -449,7 +505,10 @@ impl ObsidianMcp {
         &self,
         Parameters(params): Parameters<metadata::FrontmatterParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        metadata::frontmatter(&self.vault, params).await
+        self.with_sync(!params.action.eq_ignore_ascii_case("get"), async {
+            metadata::frontmatter(&self.vault, params).await
+        })
+        .await
     }
 
     // ── Graph / Links ───────────────────────────────────────────────
@@ -464,7 +523,8 @@ impl ObsidianMcp {
         &self,
         Parameters(params): Parameters<graph::WikilinksParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        graph::wikilinks(&self.vault, params).await
+        self.with_sync(false, async { graph::wikilinks(&self.vault, params).await })
+            .await
     }
 
     // ── Periodic Notes ──────────────────────────────────────────────
@@ -482,7 +542,10 @@ impl ObsidianMcp {
         &self,
         Parameters(params): Parameters<periodic::PeriodicParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        periodic::periodic(&self.vault, params).await
+        self.with_sync(params.action.eq_ignore_ascii_case("create"), async {
+            periodic::periodic(&self.vault, params).await
+        })
+        .await
     }
 
     // ── Utility ─────────────────────────────────────────────────────
@@ -497,7 +560,10 @@ impl ObsidianMcp {
         &self,
         Parameters(params): Parameters<utility::VaultInfoParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        utility::vault_info(&self.vault, &self.semantic_runtime, params).await
+        self.with_sync(false, async {
+            utility::vault_info(&self.vault, &self.semantic_runtime, params).await
+        })
+        .await
     }
 
     #[tool(
@@ -511,6 +577,45 @@ impl ObsidianMcp {
         Parameters(params): Parameters<utility::OpenInObsidianParams>,
     ) -> Result<CallToolResult, ErrorData> {
         utility::open_in_obsidian(&self.vault, params).await
+    }
+    async fn with_sync<F>(&self, mutation: bool, operation: F) -> Result<CallToolResult, ErrorData>
+    where
+        F: std::future::Future<Output = Result<CallToolResult, ErrorData>>,
+    {
+        match self.vault.headless_sync() {
+            Some(sync) => sync.execute(&self.vault, mutation, operation).await,
+            None => operation.await,
+        }
+    }
+
+    #[tool(
+        name = "sync_status",
+        annotations(read_only_hint = true, destructive_hint = false, idempotent_hint = true, open_world_hint = false),
+        output_schema = schema_for_output::<crate::headless_sync::SyncStatus>(),
+        description = "Inspect managed Headless Sync state without starting sync. Reports disabled mode, last successful sync, running state and whether a local write may still need uploading."
+    )]
+    async fn sync_status(&self) -> Result<CallToolResult, ErrorData> {
+        output::json(
+            &self
+                .vault
+                .headless_sync()
+                .map(|sync| sync.status())
+                .unwrap_or_else(crate::headless_sync::SyncStatus::disabled),
+        )
+    }
+
+    #[tool(
+        name = "sync_now",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = true),
+        output_schema = schema_for_output::<crate::headless_sync::SyncStatus>(),
+        description = "Run a serialized bidirectional Headless Sync pass and refresh metadata/search indexes. Use to retry upload only after a local write succeeded with a sync warning; never replay that write. Returns enabled=false without running a command when managed sync is disabled."
+    )]
+    async fn sync_now(&self) -> Result<CallToolResult, ErrorData> {
+        let status = match self.vault.headless_sync() {
+            Some(sync) => sync.sync_now(&self.vault).await?,
+            None => crate::headless_sync::SyncStatus::disabled(),
+        };
+        output::json(&status)
     }
 }
 

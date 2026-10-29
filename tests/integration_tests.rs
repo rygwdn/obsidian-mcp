@@ -913,7 +913,7 @@ mod tool_filtering {
     }
 
     #[tokio::test]
-    async fn full_profile_exposes_all_19_tools() {
+    async fn full_profile_exposes_all_21_tools() {
         let (_tmp, server) = build_server(ToolFilter::Full).await;
         let tools = server.tool_router.list_all();
         assert_eq!(
@@ -951,10 +951,10 @@ mod tool_filtering {
     }
 
     #[tokio::test]
-    async fn read_profile_exposes_10_tools() {
+    async fn read_profile_exposes_11_tools() {
         let (_tmp, server) = build_server(ToolFilter::Profile("read".into())).await;
         let tools = server.tool_router.list_all();
-        assert_eq!(tools.len(), 10, "read profile should expose 10 tools");
+        assert_eq!(tools.len(), 11, "read profile should expose 11 tools");
         assert!(!server.tool_router.has_route("frontmatter"));
 
         assert!(server.tool_router.has_route("note_read"));

@@ -55,7 +55,7 @@ impl VaultIndex {
             .map_err(|e| VaultError::Other(format!("index build task panicked: {e}")))?
     }
 
-    fn build_sync(vault_root: &Path, exclude: &ExcludeSet) -> VaultResult<Self> {
+    pub(crate) fn build_sync(vault_root: &Path, exclude: &ExcludeSet) -> VaultResult<Self> {
         let mut notes = HashMap::new();
         let mut tags: HashMap<String, HashSet<PathBuf>> = HashMap::new();
         let mut non_md_file_count: usize = 0;

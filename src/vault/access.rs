@@ -92,7 +92,7 @@ impl Policy {
         let canonical = match resolved.absolute.canonicalize() {
             Ok(p) => p
                 .strip_prefix(&canonical_root)
-                .map_err(|_| denied())?
+                .map_err(|_| VaultError::OutsideVault(requested.to_path_buf()))?
                 .to_path_buf(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // Resolve an existing symlink parent for new files, too.
@@ -105,7 +105,7 @@ impl Policy {
                 let parent = parent.canonicalize()?;
                 let mut target = parent
                     .strip_prefix(&canonical_root)
-                    .map_err(|_| denied())?
+                    .map_err(|_| VaultError::OutsideVault(requested.to_path_buf()))?
                     .to_path_buf();
                 for part in tail.into_iter().rev() {
                     target.push(part);

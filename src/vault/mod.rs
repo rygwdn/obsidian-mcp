@@ -351,8 +351,10 @@ impl Vault {
                 {
                     runtime.submit_remove(path);
                 }
-                for path in fresh.notes().keys() {
-                    runtime.submit_upsert(path);
+                for (path, note) in fresh.notes() {
+                    if index.get_note(path) != Some(note) {
+                        runtime.submit_upsert(path);
+                    }
                 }
             }
             *index = fresh;
@@ -2263,6 +2265,52 @@ mod tests {
         vault.move_note(old_path, new_path).unwrap();
         assert_eq!(runtime.pending_kind(old_path), Some(PendingKind::Remove));
         assert_eq!(runtime.pending_kind(new_path), Some(PendingKind::Upsert));
+    }
+
+    #[cfg(has_embeddings)]
+    #[tokio::test]
+    async fn access_refresh_does_not_requeue_unchanged_embeddings() {
+        let dir = tempfile::tempdir().unwrap();
+        create_test_vault(dir.path());
+        std::fs::write(dir.path().join("note.md"), "original").unwrap();
+        let model = Arc::new(TestEmbedder::new());
+        let loader_model = Arc::clone(&model);
+        let loader: EmbeddingLoaderFuture =
+            Box::pin(async move { Ok(loader_model as Arc<dyn embeddings::Embedder>) });
+        let vault = Vault::open_with_embedding_loader(&embedding_config(dir.path()), Some(loader))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !vault
+                .embedding_status()
+                .is_some_and(|s| s.phase == embedding_runtime::EmbeddingPhase::Ready)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for _ in 0..3 {
+            vault.refresh_after_sync().await.unwrap();
+            let status = vault.embedding_status().unwrap();
+            assert_eq!(status.phase, embedding_runtime::EmbeddingPhase::Ready);
+            assert_eq!(status.pending_notes, 0);
+        }
+        assert_eq!(model.inputs.lock().unwrap().len(), 1);
+        std::fs::write(
+            dir.path().join("note.md"),
+            "changed content with a different size",
+        )
+        .unwrap();
+        vault.refresh_after_sync().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while model.inputs.lock().unwrap().len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(model.inputs.lock().unwrap().len(), 2);
     }
 
     #[cfg(has_embeddings)]

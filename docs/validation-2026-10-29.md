@@ -98,3 +98,25 @@ and HTTP-level reload/search/list/batch behavior. Final checks: 647 library,
 previously documented environment exclusions. Formatting, normal Clippy and
 embeddings-api compilation pass. Live homelab behavior and the full local
 embedding/model-download matrix remain untested.
+
+## CI corrections
+
+CI exposed two regressions in the access-policy changes: repeated metadata
+refreshes requeued unchanged local embeddings (preventing readiness), and the
+macOS native-case symlink path returned a generic policy denial instead of
+`OutsideVault`. Refresh now submits only new/changed note metadata to the
+embedding runtime, with a ready-state regression test; real-path escapes retain
+the existing `OutsideVault` error category.
+
+Updated pulldown-cmark, rustls-webpki, root certificates, Tokio and Tantivy patch
+versions. Disabled unused Tantivy columnar Zstd compression; the in-memory index
+continues to use LZ4. This removes the vulnerable Zstd bindings instead of
+suppressing advisories. `cargo audit` reports zero vulnerabilities; upstream
+warnings remain for bincode/paste maintenance and lru panic safety.
+
+Locally, the previously failing single-worker semantic-progress test and the new
+unchanged-embedding regression pass with embeddings-api. The full semantic API
+suite was attempted: its three daemon-process cases hit the environment's Unix
+socket permission restriction during startup. They must be confirmed in GitHub
+CI, along with the macOS-specific case. Default library/integration/transport
+checks retain the previously documented exclusions and passing counts.

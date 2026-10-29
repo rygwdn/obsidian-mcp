@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Metadata about a single note in the vault.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct NoteMetadata {
     /// Path relative to vault root.
     pub path: PathBuf,
@@ -25,14 +25,14 @@ pub struct NoteMetadata {
     pub stat: FileStat,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct FileStat {
     pub size: u64,
     pub created: Option<DateTime<Utc>>,
     pub modified: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Heading {
     /// Heading level (1–6).
     pub level: u8,
@@ -42,7 +42,7 @@ pub struct Heading {
     pub line: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct WikiLink {
     /// Full raw text, e.g. `[[note#heading|alias]]`.
     pub raw: String,

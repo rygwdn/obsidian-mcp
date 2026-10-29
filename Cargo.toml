@@ -27,7 +27,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
 unicode-normalization = "0.1.25"
-tantivy = "0.26"
+# Keep LZ4 for the in-memory index; unused columnar Zstd pulls vulnerable 0.13 bindings.
+tantivy = { version = "0.26.2", default-features = false, features = ["mmap", "stopwords", "lz4-compression", "stemmer"] }
 fastembed = { version = "6.0.3", optional = true }
 bincode = { version = "2", optional = true, features = ["serde"] }
 fs2 = "0.4"

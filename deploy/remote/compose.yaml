@@ -1,9 +1,6 @@
 services:
   obsidian-mcp:
-    build:
-      context: ../..
-      dockerfile: deploy/remote/Dockerfile
-      target: ${OBSIDIAN_IMAGE_TARGET:-final}
+    image: ${OBSIDIAN_IMAGE:-ghcr.io/rygwdn/obsidian-mcp:edge}
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
     ports:

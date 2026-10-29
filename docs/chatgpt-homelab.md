@@ -69,7 +69,8 @@ recovery copies. The existing vault must also allow this UID to write the
 upstream `.obsidian-mcp` configuration folder.
 
 ```bash
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 curl --fail http://127.0.0.1:37842/health
 tailscale funnel status
 # After checking that this node/port is not already serving another application:
@@ -224,9 +225,9 @@ remain necessary; this is not a distributed transaction.
 
 For the supplied container:
 
-1. Set `OBSIDIAN_IMAGE_TARGET=managed-sync` and `OBSIDIAN_SYNC_MODE=managed` in
+1. Set `OBSIDIAN_IMAGE=ghcr.io/rygwdn/obsidian-mcp:edge-sync` and `OBSIDIAN_SYNC_MODE=managed` in
    `.env`. This optional image installs Node 22 and `obsidian-headless@0.0.14`.
-2. Stop the old sync process, then run `docker compose build` from `deploy/remote`.
+2. Stop the old sync process, then run `docker compose pull` from `deploy/remote`.
 3. Authenticate interactively with
    `docker compose run --rm --entrypoint ob obsidian-mcp login`.
 4. Run `docker compose run --rm --entrypoint ob obsidian-mcp sync-list-remote`,
@@ -268,3 +269,46 @@ Managed read calls can upload pre-existing local changes because sync is
 bidirectional. Tool annotations reflect this external write behavior. OAuth
 `vault:read` still limits requested note operations; it does not make underlying
 Sync housekeeping download-only. `sync_now` requires `vault:write` remotely.
+
+
+## Published container images (GHCR)
+
+Compose pulls `ghcr.io/rygwdn/obsidian-mcp:edge` by default. For this homelab's
+managed Headless Sync setup, set:
+
+```dotenv
+OBSIDIAN_IMAGE=ghcr.io/rygwdn/obsidian-mcp:edge-sync
+OBSIDIAN_SYNC_MODE=managed
+```
+
+The `Container images` workflow publishes Linux amd64 and arm64 images:
+
+| Source | Standalone | Includes Headless Sync CLI |
+| --- | --- | --- |
+| `feat/chatgpt-remote-access` | `edge` | `edge-sync` |
+| `main` | `latest` | `latest-sync` |
+| Pushed `v*` tag | e.g. `v3.3.0` | e.g. `v3.3.0-sync` |
+| Every published commit | `sha-<full-commit-sha>` | `sha-<full-commit-sha>-sync` |
+
+`latest` follows main, not an arbitrary release tag. Pin a digest or full commit
+tag for controlled upgrades; edge/latest are mutable. After a successful image
+build, update with `docker compose pull && docker compose up -d`. The existing
+vault and data bind mounts retain notes, CLI login and configuration.
+
+Publishing uses the repository's automatic `GITHUB_TOKEN` with `packages:write`;
+no registry password or PAT needs to be added as a repository secret. PR builds
+validate both variants without logging in or pushing. The workflow also supports
+manual runs once present on the default branch. Source, revision, SBOM and build
+provenance are included. The first build may take longer, particularly arm64
+under emulation.
+
+GitHub may require Actions to be enabled in a new fork. Packages initially may
+be private even for a public repository: after the first publish, set the
+`obsidian-mcp` package's visibility to public for anonymous homelab pulls, or
+log Docker into GHCR with an account token permitted to read packages. Never
+paste a token into chat. Package access settings are separate from repository
+visibility. Check the Actions run completed before trying a newly added tag.
+
+To build locally instead, use
+`docker compose -f compose.yaml -f compose.build.yaml up -d --build` and set
+`OBSIDIAN_IMAGE_TARGET=managed-sync` for the CLI variant (`final` otherwise).

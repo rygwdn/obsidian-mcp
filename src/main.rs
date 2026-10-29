@@ -99,8 +99,25 @@ async fn serve_http(
     let mut mcp_config = StreamableHttpServerConfig::default();
     mcp_config.legacy_session_mode = true;
     mcp_config.json_response = true;
+    let oauth = obsidian_mcp::http_auth::OAuthConfig::from_env()?;
+    let oauth_enabled = oauth.is_some();
+    if let Some(ref oauth) = oauth {
+        let resource = reqwest::Url::parse(&oauth.resource)?;
+        let host = match resource.port() {
+            Some(port) => format!(
+                "{}:{port}",
+                resource.host_str().ok_or("missing public host")?
+            ),
+            None => resource.host_str().ok_or("missing public host")?.to_owned(),
+        };
+        mcp_config.allowed_hosts.push(host);
+        mcp_config
+            .allowed_origins
+            .push(oauth.resource.trim_end_matches("/mcp").to_owned());
+    }
 
     let health_vault = vault.clone();
+    let vault_root = vault.root().to_path_buf();
     let mcp_service: StreamableHttpService<ObsidianMcp, LocalSessionManager> =
         StreamableHttpService::new(
             move || {
@@ -129,8 +146,34 @@ async fn serve_http(
         .nest_service("/mcp", mcp_service)
         .layer(middleware::from_fn(tool_filter_middleware));
 
+    let mcp_router = if let Some(oauth) = oauth {
+        let backup = std::env::var_os("OBSIDIAN_BACKUP_DIR")
+            .ok_or("OAuth HTTP mode requires OBSIDIAN_BACKUP_DIR outside the vault")?;
+        std::fs::create_dir_all(&backup)?;
+        if std::fs::canonicalize(&backup)?.starts_with(vault_root) {
+            return Err("OBSIDIAN_BACKUP_DIR must be outside the vault".into());
+        }
+        let auth = obsidian_mcp::http_auth::OAuthState::new(oauth).await?;
+        let protected = mcp_router.layer(middleware::from_fn_with_state(
+            auth.clone(),
+            obsidian_mcp::http_auth::authenticate,
+        ));
+        protected.merge(obsidian_mcp::http_auth::metadata_routes(auth))
+    } else {
+        if !config.http_host.is_loopback() {
+            return Err("Non-loopback HTTP requires OAuth configuration".into());
+        }
+        tracing::warn!(
+            "HTTP is unauthenticated; keep this listener private unless OAuth is configured"
+        );
+        mcp_router
+    };
+
     let app = Router::new()
-        .route("/health", get(move || health_handler(health_vault.clone())))
+        .route(
+            "/health",
+            get(move || health_handler(health_vault.clone(), oauth_enabled)),
+        )
         .merge(mcp_router);
 
     let addr = std::net::SocketAddr::new(config.http_host, config.http_port);
@@ -150,7 +193,7 @@ async fn tool_filter_middleware(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
 
-    let disabled = match request.headers().get("X-Obsidian-Tools") {
+    let mut disabled = match request.headers().get("X-Obsidian-Tools") {
         Some(header) => {
             let filter = header
                 .to_str()
@@ -167,12 +210,24 @@ async fn tool_filter_middleware(
         None => HashSet::new(),
     };
 
+    if let Some(restrictions) = request
+        .extensions()
+        .get::<obsidian_mcp::http_auth::AuthToolRestrictions>()
+    {
+        disabled.extend(restrictions.0.iter().cloned());
+    }
+
     REQUEST_DISABLED_TOOLS
         .scope(disabled, next.run(request))
         .await
 }
 
-async fn health_handler(vault: Vault) -> axum::Json<serde_json::Value> {
+async fn health_handler(vault: Vault, oauth_enabled: bool) -> axum::Json<serde_json::Value> {
+    if oauth_enabled {
+        return axum::Json(
+            serde_json::json!({"status": "ok", "server": env!("CARGO_PKG_NAME"), "version": env!("CARGO_PKG_VERSION")}),
+        );
+    }
     let stats = vault.vault_stats().ok();
     let note_count = stats.as_ref().map(|s| s.total_notes);
 

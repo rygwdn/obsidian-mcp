@@ -1,0 +1,6 @@
+.git
+target
+tests
+**/.env
+deploy/remote/data
+*.zip

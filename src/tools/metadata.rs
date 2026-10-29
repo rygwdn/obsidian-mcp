@@ -121,6 +121,8 @@ async fn note_inspect_targets(
 /// Parameters for the `frontmatter` tool.
 #[derive(Deserialize, JsonSchema, Default)]
 pub struct FrontmatterParams {
+    /// Revision from note_read. Required for authenticated HTTP mutations.
+    pub expected_revision: Option<String>,
     /// Action to perform: `"get"` (return all frontmatter), `"set"` (upsert a field), or `"remove"` (delete a field).
     pub action: String,
     /// Path to the note, relative to vault root.
@@ -164,7 +166,12 @@ pub async fn frontmatter(
                 None::<serde_json::Value>,
             )
         })?;
-        vault.set_frontmatter_field(path, key, value)?;
+        vault.set_frontmatter_field_checked(
+            path,
+            key,
+            value,
+            params.expected_revision.as_deref(),
+        )?;
         let message = format!("Set frontmatter field '{key}' on '{}'", params.path);
         super::output::with_text(
             &FrontmatterOutput::Set {
@@ -180,7 +187,7 @@ pub async fn frontmatter(
                 None::<serde_json::Value>,
             )
         })?;
-        vault.remove_frontmatter_field(path, key)?;
+        vault.remove_frontmatter_field_checked(path, key, params.expected_revision.as_deref())?;
         let message = format!("Removed frontmatter field '{key}' from '{}'", params.path);
         super::output::with_text(
             &FrontmatterOutput::Remove {
@@ -358,6 +365,7 @@ mod tests {
         note_patch(
             &vault,
             NotePatchParams {
+                expected_revision: None,
                 path: "scratch.md".into(),
                 operation: PatchOperation::Append,
                 target_type: PatchTargetType::Heading,
@@ -423,6 +431,7 @@ mod tests {
         frontmatter(
             &vault,
             FrontmatterParams {
+                expected_revision: None,
                 action: "set".into(),
                 path: "fm.md".into(),
                 key: Some("status".into()),
@@ -448,6 +457,7 @@ mod tests {
         frontmatter(
             &vault,
             FrontmatterParams {
+                expected_revision: None,
                 action: "set".into(),
                 path: "fm.md".into(),
                 key: Some("tags".into()),
@@ -478,6 +488,7 @@ mod tests {
             frontmatter(
                 &vault,
                 FrontmatterParams {
+                    expected_revision: None,
                     action: "set".into(),
                     path: "fm.md".into(),
                     key: Some(key.into()),
@@ -505,6 +516,7 @@ mod tests {
         frontmatter(
             &vault,
             FrontmatterParams {
+                expected_revision: None,
                 action: "remove".into(),
                 path: "fm.md".into(),
                 key: Some("status".into()),
@@ -596,6 +608,7 @@ mod tests {
         let result = frontmatter(
             &vault,
             FrontmatterParams {
+                expected_revision: None,
                 action: "set".into(),
                 path: "fm.md".into(),
                 key: None,
@@ -616,6 +629,7 @@ mod tests {
         let result = frontmatter(
             &vault,
             FrontmatterParams {
+                expected_revision: None,
                 action: "set".into(),
                 path: "fm.md".into(),
                 key: Some("k".into()),
@@ -636,6 +650,7 @@ mod tests {
         let result = frontmatter(
             &vault,
             FrontmatterParams {
+                expected_revision: None,
                 action: "remove".into(),
                 path: "fm.md".into(),
                 key: None,

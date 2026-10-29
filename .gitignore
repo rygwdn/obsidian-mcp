@@ -2,6 +2,10 @@ TODO.md
 CLAUDE.md
 AGENTS.md
 target/
+__pycache__/
+deploy/remote/.env
+deploy/remote/data/
+personal-obsidian-vault.zip
 .DS_Store
 .cursor/
 tmp/

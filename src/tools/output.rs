@@ -13,6 +13,13 @@ pub struct TextOutput {
 }
 
 #[derive(Serialize, JsonSchema)]
+pub struct RevisionedContent {
+    pub content: String,
+    /// SHA-256 of these exact content bytes. Pass as expected_revision to mutations.
+    pub revision: String,
+}
+
+#[derive(Serialize, JsonSchema)]
 pub struct MessageOutput {
     /// Confirmation of the completed operation.
     pub message: String,
@@ -42,15 +49,6 @@ pub fn results<T: Serialize>(value: T) -> Result<CallToolResult, ErrorData> {
     let text = serde_json::to_string_pretty(&value)
         .map_err(|error| VaultError::Other(format!("JSON serialization failed: {error}")))?;
     with_text(&Results { results: value }, text)
-}
-
-pub fn content(content: String) -> Result<CallToolResult, ErrorData> {
-    with_text(
-        &TextOutput {
-            content: content.clone(),
-        },
-        content,
-    )
 }
 
 pub fn message(message: String) -> Result<CallToolResult, ErrorData> {

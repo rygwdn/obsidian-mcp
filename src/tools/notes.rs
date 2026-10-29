@@ -47,6 +47,7 @@ pub struct NoteReadManyParams {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct NoteReadManyItem {
+    pub revision: String,
     pub path: String,
     pub content: String,
 }
@@ -99,6 +100,8 @@ pub struct NoteCreateParams {
 
 #[derive(Deserialize, JsonSchema, Default)]
 pub struct NoteWriteParams {
+    /// Revision from note_read. Required for authenticated HTTP mutations.
+    pub expected_revision: Option<String>,
     /// Path to the note, relative to vault root.
     pub path: String,
     /// New content that replaces the entire note.
@@ -107,6 +110,8 @@ pub struct NoteWriteParams {
 
 #[derive(Deserialize, JsonSchema, Default)]
 pub struct NoteInsertParams {
+    /// Revision from note_read. Required for authenticated HTTP mutations.
+    pub expected_revision: Option<String>,
     /// Path to the note, relative to vault root.
     pub path: String,
     /// Content to insert.
@@ -118,6 +123,8 @@ pub struct NoteInsertParams {
 
 #[derive(Deserialize, JsonSchema)]
 pub struct NotePatchParams {
+    /// Revision from note_read. Required for authenticated HTTP mutations.
+    pub expected_revision: Option<String>,
     /// Path to the note, relative to vault root.
     pub path: String,
     /// Patch operation: `append`, `prepend`, or `replace`.
@@ -133,6 +140,7 @@ pub struct NotePatchParams {
 impl Default for NotePatchParams {
     fn default() -> Self {
         Self {
+            expected_revision: None,
             path: String::new(),
             operation: PatchOperation::Append,
             target_type: PatchTargetType::Heading,
@@ -144,6 +152,8 @@ impl Default for NotePatchParams {
 
 #[derive(Deserialize, JsonSchema, Default)]
 pub struct NoteDeleteParams {
+    /// Revision from note_read. Required for authenticated HTTP mutations.
+    pub expected_revision: Option<String>,
     /// Path to the note, relative to vault root.
     pub path: String,
     /// Must be `true` to confirm deletion — a safety check to prevent accidental data loss.
@@ -152,6 +162,8 @@ pub struct NoteDeleteParams {
 
 #[derive(Deserialize, JsonSchema, Default)]
 pub struct NoteMoveParams {
+    /// Revision from note_read. Required for authenticated HTTP mutations.
+    pub expected_revision: Option<String>,
     /// Current path of the note, relative to vault root.
     pub from: String,
     /// Destination path, relative to vault root.
@@ -297,6 +309,7 @@ pub async fn note_read_many(
 
         content_bytes += note_bytes;
         notes.push(NoteReadManyItem {
+            revision: crate::vault::fs::revision(&content),
             path: display_path,
             content,
         });
@@ -384,7 +397,11 @@ pub async fn note_create(vault: &Vault, params: NoteCreateParams) -> Result<Stri
 }
 
 pub async fn note_write(vault: &Vault, params: NoteWriteParams) -> Result<String, ErrorData> {
-    vault.write_note(Path::new(&params.path), &params.content)?;
+    vault.write_note_checked(
+        Path::new(&params.path),
+        &params.content,
+        params.expected_revision.as_deref(),
+    )?;
     Ok(format!("Written to: {}", params.path))
 }
 
@@ -392,10 +409,18 @@ pub async fn note_insert(vault: &Vault, params: NoteInsertParams) -> Result<Stri
     let position = params.position.as_deref().unwrap_or("end");
 
     if position.eq_ignore_ascii_case("end") {
-        vault.append_note(Path::new(&params.path), &params.content)?;
+        vault.append_note_checked(
+            Path::new(&params.path),
+            &params.content,
+            params.expected_revision.as_deref(),
+        )?;
         Ok(format!("Inserted into: {}", params.path))
     } else if position.eq_ignore_ascii_case("beginning") {
-        vault.prepend_note(Path::new(&params.path), &params.content)?;
+        vault.prepend_note_checked(
+            Path::new(&params.path),
+            &params.content,
+            params.expected_revision.as_deref(),
+        )?;
         Ok(format!("Inserted into: {}", params.path))
     } else {
         Err(ErrorData::new(
@@ -413,7 +438,11 @@ pub async fn note_patch(vault: &Vault, params: NotePatchParams) -> Result<String
         target: params.target,
         content: params.content,
     };
-    vault.patch_note(Path::new(&params.path), &request)?;
+    vault.patch_note_checked(
+        Path::new(&params.path),
+        &request,
+        params.expected_revision.as_deref(),
+    )?;
     Ok(format!("Patched: {}", params.path))
 }
 
@@ -425,12 +454,16 @@ pub async fn note_delete(vault: &Vault, params: NoteDeleteParams) -> Result<Stri
             None::<serde_json::Value>,
         ));
     }
-    vault.delete_note(Path::new(&params.path))?;
+    vault.delete_note_checked(Path::new(&params.path), params.expected_revision.as_deref())?;
     Ok(format!("Deleted: {}", params.path))
 }
 
 pub async fn note_move(vault: &Vault, params: NoteMoveParams) -> Result<String, ErrorData> {
-    let new_path = vault.move_note(Path::new(&params.from), Path::new(&params.to))?;
+    let new_path = vault.move_note_checked(
+        Path::new(&params.from),
+        Path::new(&params.to),
+        params.expected_revision.as_deref(),
+    )?;
     Ok(format!("Moved to: {}", new_path.display()))
 }
 
@@ -919,6 +952,7 @@ mod tests {
         note_write(
             &vault,
             NoteWriteParams {
+                expected_revision: None,
                 path: "note.md".into(),
                 content: "new content".into(),
             },
@@ -942,6 +976,7 @@ mod tests {
         note_insert(
             &vault,
             NoteInsertParams {
+                expected_revision: None,
                 path: "note.md".into(),
                 content: "\nmore".into(),
                 position: Some("end".into()),
@@ -965,6 +1000,7 @@ mod tests {
         note_insert(
             &vault,
             NoteInsertParams {
+                expected_revision: None,
                 path: "note.md".into(),
                 content: "\nmore".into(),
                 position: None,
@@ -990,6 +1026,7 @@ mod tests {
         note_insert(
             &vault,
             NoteInsertParams {
+                expected_revision: None,
                 path: "note.md".into(),
                 content: "injected\n".into(),
                 position: Some("beginning".into()),
@@ -1014,6 +1051,7 @@ mod tests {
         let result = note_insert(
             &vault,
             NoteInsertParams {
+                expected_revision: None,
                 path: "note.md".into(),
                 content: "text".into(),
                 position: Some("middle".into()),
@@ -1035,6 +1073,7 @@ mod tests {
         note_insert(
             &vault,
             NoteInsertParams {
+                expected_revision: None,
                 path: "note.md".into(),
                 content: "\nmore".into(),
                 position: Some("END".into()),
@@ -1061,6 +1100,7 @@ mod tests {
         note_patch(
             &vault,
             NotePatchParams {
+                expected_revision: None,
                 path: "patched.md".into(),
                 operation: PatchOperation::Append,
                 target_type: PatchTargetType::Heading,
@@ -1088,6 +1128,7 @@ mod tests {
         let result = note_delete(
             &vault,
             NoteDeleteParams {
+                expected_revision: None,
                 path: "note.md".into(),
                 confirm: false,
             },
@@ -1107,6 +1148,7 @@ mod tests {
         note_delete(
             &vault,
             NoteDeleteParams {
+                expected_revision: None,
                 path: "note.md".into(),
                 confirm: true,
             },
@@ -1128,6 +1170,7 @@ mod tests {
         let msg = note_move(
             &vault,
             NoteMoveParams {
+                expected_revision: None,
                 from: "old.md".into(),
                 to: "new.md".into(),
             },

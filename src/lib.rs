@@ -7,5 +7,6 @@ pub mod tools;
 pub mod upgrade;
 pub mod vault;
 
+pub mod http_auth;
 #[cfg(test)]
 pub(crate) mod test_helpers;

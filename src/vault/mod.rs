@@ -344,22 +344,44 @@ impl Vault {
     }
 
     pub fn write_note(&self, path: &Path, content: &str) -> VaultResult<()> {
+        self.write_note_checked(path, content, None)
+    }
+
+    pub fn write_note_checked(
+        &self,
+        path: &Path,
+        content: &str,
+        expected_revision: Option<&str>,
+    ) -> VaultResult<()> {
         let _mutation = self.lock_mutations()?;
+        fs::check_revision(&self.inner.root, path, expected_revision)?;
         frontmatter::parse_frontmatter(content)?;
-        let actual_path = fs::write_file(&self.inner.root, path, content)?;
+        let actual_path =
+            fs::write_file_checked(&self.inner.root, path, content, expected_revision)?;
         self.reindex(&actual_path)?;
         Ok(())
     }
 
     pub fn append_note(&self, path: &Path, content: &str) -> VaultResult<()> {
+        self.append_note_checked(path, content, None)
+    }
+
+    pub fn append_note_checked(
+        &self,
+        path: &Path,
+        content: &str,
+        expected_revision: Option<&str>,
+    ) -> VaultResult<()> {
         let _mutation = self.lock_mutations()?;
+        fs::check_revision(&self.inner.root, path, expected_revision)?;
         let combined = match fs::read_file(&self.inner.root, path) {
             Ok(existing) => existing + content,
             Err(VaultError::NoteNotFound(_)) => content.to_owned(),
             Err(error) => return Err(error),
         };
         frontmatter::parse_frontmatter(&combined)?;
-        let actual_path = fs::append_file(&self.inner.root, path, content)?;
+        let actual_path =
+            fs::write_file_checked(&self.inner.root, path, &combined, expected_revision)?;
         self.reindex(&actual_path)?;
         Ok(())
     }
@@ -390,7 +412,17 @@ impl Vault {
 
     /// Prepend content after frontmatter (or at the start if none exists).
     pub fn prepend_note(&self, path: &Path, content: &str) -> VaultResult<()> {
+        self.prepend_note_checked(path, content, None)
+    }
+
+    pub fn prepend_note_checked(
+        &self,
+        path: &Path,
+        content: &str,
+        expected_revision: Option<&str>,
+    ) -> VaultResult<()> {
         let _mutation = self.lock_mutations()?;
+        fs::check_revision(&self.inner.root, path, expected_revision)?;
         let existing = fs::read_file(&self.inner.root, path)?;
         let new_content = match frontmatter::extract_raw_frontmatter(&existing) {
             Some((_, body_start)) => {
@@ -403,13 +435,25 @@ impl Vault {
             None => format!("{content}{existing}"),
         };
         frontmatter::parse_frontmatter(&new_content)?;
-        let actual_path = fs::write_file(&self.inner.root, path, &new_content)?;
+        let actual_path =
+            fs::write_file_checked(&self.inner.root, path, &new_content, expected_revision)?;
         self.reindex(&actual_path)?;
         Ok(())
     }
 
     pub fn delete_note(&self, path: &Path) -> VaultResult<()> {
+        self.delete_note_checked(path, None)
+    }
+
+    pub fn delete_note_checked(
+        &self,
+        path: &Path,
+        expected_revision: Option<&str>,
+    ) -> VaultResult<()> {
         let _mutation = self.lock_mutations()?;
+        fs::check_revision(&self.inner.root, path, expected_revision)?;
+        fs::backup_file(&self.inner.root, path)?;
+        fs::check_revision(&self.inner.root, path, expected_revision)?;
         let actual_path = fs::delete_file(&self.inner.root, path)?;
         self.write_index().remove_file(&actual_path);
         if let Some(tv) = &self.inner.tantivy {
@@ -423,7 +467,19 @@ impl Vault {
     }
 
     pub fn move_note(&self, from: &Path, to: &Path) -> VaultResult<PathBuf> {
+        self.move_note_checked(from, to, None)
+    }
+
+    pub fn move_note_checked(
+        &self,
+        from: &Path,
+        to: &Path,
+        expected_revision: Option<&str>,
+    ) -> VaultResult<PathBuf> {
         let _mutation = self.lock_mutations()?;
+        fs::check_revision(&self.inner.root, from, expected_revision)?;
+        fs::backup_file(&self.inner.root, from)?;
+        fs::check_revision(&self.inner.root, from, expected_revision)?;
         let move_result = fs::move_file(&self.inner.root, from, to)?;
         let old_path = move_result.from;
         let new_path = move_result.to;
@@ -444,11 +500,22 @@ impl Vault {
     // ── patch delegation ───────────────────────────────────────────────
 
     pub fn patch_note(&self, path: &Path, request: &PatchRequest) -> VaultResult<()> {
+        self.patch_note_checked(path, request, None)
+    }
+
+    pub fn patch_note_checked(
+        &self,
+        path: &Path,
+        request: &PatchRequest,
+        expected_revision: Option<&str>,
+    ) -> VaultResult<()> {
         let _mutation = self.lock_mutations()?;
+        fs::check_revision(&self.inner.root, path, expected_revision)?;
         let content = fs::read_file(&self.inner.root, path)?;
         let patched = patch::apply_patch(&content, request, path)?;
         frontmatter::parse_frontmatter(&patched)?;
-        let actual_path = fs::write_file(&self.inner.root, path, &patched)?;
+        let actual_path =
+            fs::write_file_checked(&self.inner.root, path, &patched, expected_revision)?;
         self.reindex(&actual_path)?;
         Ok(())
     }
@@ -466,21 +533,44 @@ impl Vault {
         key: &str,
         value: serde_json::Value,
     ) -> VaultResult<()> {
+        self.set_frontmatter_field_checked(path, key, value, None)
+    }
+
+    pub fn set_frontmatter_field_checked(
+        &self,
+        path: &Path,
+        key: &str,
+        value: serde_json::Value,
+        expected_revision: Option<&str>,
+    ) -> VaultResult<()> {
         let _mutation = self.lock_mutations()?;
+        fs::check_revision(&self.inner.root, path, expected_revision)?;
         let content = fs::read_file(&self.inner.root, path)?;
         let updated = frontmatter::set_frontmatter_field(&content, key, value)?;
         frontmatter::parse_frontmatter(&updated)?;
-        let actual_path = fs::write_file(&self.inner.root, path, &updated)?;
+        let actual_path =
+            fs::write_file_checked(&self.inner.root, path, &updated, expected_revision)?;
         self.reindex(&actual_path)?;
         Ok(())
     }
 
     pub fn remove_frontmatter_field(&self, path: &Path, key: &str) -> VaultResult<()> {
+        self.remove_frontmatter_field_checked(path, key, None)
+    }
+
+    pub fn remove_frontmatter_field_checked(
+        &self,
+        path: &Path,
+        key: &str,
+        expected_revision: Option<&str>,
+    ) -> VaultResult<()> {
         let _mutation = self.lock_mutations()?;
+        fs::check_revision(&self.inner.root, path, expected_revision)?;
         let content = fs::read_file(&self.inner.root, path)?;
         let updated = frontmatter::remove_frontmatter_field(&content, key)?;
         frontmatter::parse_frontmatter(&updated)?;
-        let actual_path = fs::write_file(&self.inner.root, path, &updated)?;
+        let actual_path =
+            fs::write_file_checked(&self.inner.root, path, &updated, expected_revision)?;
         self.reindex(&actual_path)?;
         Ok(())
     }
@@ -2532,5 +2622,92 @@ mod tests {
         assert!(vault.search_by_tag("work/inbox").unwrap().is_empty());
         vault.delete_note(Path::new("a.md")).unwrap();
         assert!(vault.search_by_tag("work").unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::*;
+    use crate::test_helpers::test_config;
+
+    #[tokio::test]
+    async fn stale_edits_do_not_clobber_sync_or_other_handles() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::open(&test_config(directory.path())).await.unwrap();
+        let path = Path::new("revision.md");
+        vault.create_note(path, "# Log\noriginal\n", None).unwrap();
+        let revision = fs::revision(&vault.read_note(path).unwrap());
+        std::fs::write(directory.path().join(path), "# Log\nexternal sync\n").unwrap();
+        assert!(matches!(
+            vault.write_note_checked(path, "bad", Some(&revision)),
+            Err(VaultError::RevisionConflict { .. })
+        ));
+        assert!(matches!(
+            vault.append_note_checked(path, "bad", Some(&revision)),
+            Err(VaultError::RevisionConflict { .. })
+        ));
+        assert!(matches!(
+            vault.delete_note_checked(path, Some(&revision)),
+            Err(VaultError::RevisionConflict { .. })
+        ));
+        assert!(matches!(
+            vault.move_note_checked(path, Path::new("moved.md"), Some(&revision)),
+            Err(VaultError::RevisionConflict { .. })
+        ));
+        assert!(matches!(
+            vault.set_frontmatter_field_checked(
+                path,
+                "status",
+                serde_json::json!("bad"),
+                Some(&revision)
+            ),
+            Err(VaultError::RevisionConflict { .. })
+        ));
+        assert_eq!(vault.read_note(path).unwrap(), "# Log\nexternal sync\n");
+        let current = fs::revision(&vault.read_note(path).unwrap());
+        vault
+            .append_note_checked(path, "appended\n", Some(&current))
+            .unwrap();
+        assert!(
+            vault
+                .append_note_checked(path, "duplicate\n", Some(&current))
+                .is_err()
+        );
+        assert_eq!(
+            vault.read_note(path).unwrap(),
+            "# Log\nexternal sync\nappended\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn simultaneous_revision_checked_writers_have_one_winner() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::open(&test_config(directory.path())).await.unwrap();
+        vault
+            .create_note(Path::new("race.md"), "original", None)
+            .unwrap();
+        let revision = fs::revision("original");
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = ["one", "two"]
+            .into_iter()
+            .map(|text| {
+                let vault = vault.clone();
+                let revision = revision.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    vault.write_note_checked(Path::new("race.md"), text, Some(&revision))
+                })
+            })
+            .collect();
+        let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|result| matches!(result, Err(VaultError::RevisionConflict { .. })))
+                .count(),
+            1
+        );
     }
 }

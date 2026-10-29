@@ -1,0 +1,36 @@
+services:
+  obsidian-mcp:
+    build:
+      context: ../..
+      dockerfile: deploy/remote/Dockerfile
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    ports:
+      - "127.0.0.1:37842:37842"
+    environment:
+      OBSIDIAN_PUBLIC_URL: ${OBSIDIAN_PUBLIC_URL:?Set the Funnel HTTPS origin}
+      OBSIDIAN_OAUTH_ISSUER: ${OBSIDIAN_OAUTH_ISSUER:?Set the OIDC issuer URL}
+      OBSIDIAN_OAUTH_AUDIENCE: ${OBSIDIAN_OAUTH_AUDIENCE:?Set the access-token audience}
+      OBSIDIAN_OAUTH_SUBJECTS: ${OBSIDIAN_OAUTH_SUBJECTS:?Allow your own subject ID}
+      OBSIDIAN_TOOLS: ${OBSIDIAN_TOOLS:-!open_in_obsidian}
+      TZ: ${TZ:-America/Halifax}
+    volumes:
+      - type: bind
+        source: ${VAULT_HOST_PATH:?Set the existing Headless Sync vault folder}
+        target: /vault
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./data
+        target: /data
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 512m

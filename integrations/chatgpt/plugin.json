@@ -1,0 +1,19 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "personal-obsidian-vault",
+  "version": "0.1.0",
+  "description": "Work with a personal Obsidian vault through a self-hosted Rust MCP server.",
+  "author": {"name": "Ryan"},
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Personal Obsidian Vault",
+        "shortDescription": "Search and update your notes",
+        "longDescription": "Search, read and update notes, explore links and tags, and work with daily notes using a connected self-hosted Obsidian MCP service.",
+        "developerName": "Ryan",
+        "capabilities": [],
+        "defaultPrompt": "Help me find and work with notes in my Obsidian vault."
+      }
+    }
+  }
+}

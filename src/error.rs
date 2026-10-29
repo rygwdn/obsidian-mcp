@@ -6,6 +6,8 @@ use rmcp::model::ErrorCode;
 
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {
+    #[error("Revision conflict in {path}: read the note again before editing")]
+    RevisionConflict { path: PathBuf },
     #[error("Note not found: {0}")]
     NoteNotFound(PathBuf),
 
@@ -95,6 +97,7 @@ impl From<VaultError> for rmcp::ErrorData {
             VaultError::NoteNotFound(_) | VaultError::DirectoryNotFound(_) => {
                 ErrorCode::RESOURCE_NOT_FOUND
             }
+            VaultError::RevisionConflict { .. } => ErrorCode::INVALID_REQUEST,
             VaultError::InvalidPath(_)
             | VaultError::OutsideVault(_)
             | VaultError::AlreadyExists(_)
@@ -123,6 +126,10 @@ impl From<VaultError> for rmcp::ErrorData {
             },
         };
         let data = match &err {
+            VaultError::RevisionConflict { path } => Some(serde_json::json!({
+                "kind": "revision_conflict", "path": path, "retryable": true,
+                "resolution": "Read the note again and reconsider the edit; do not blindly retry."
+            })),
             VaultError::DaemonRpc { data, .. } => data.clone(),
             _ => None,
         };

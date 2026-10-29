@@ -1,5 +1,7 @@
 # obsidian-mcp
 
+> This branch adds authenticated homelab access and revision-checked edits. See [ChatGPT homelab setup](docs/chatgpt-homelab.md) for OAuth, Funnel, Docker and optional plugin packaging.
+
 [![CI](https://github.com/lstpsche/obsidian-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/lstpsche/obsidian-mcp/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/obsidian-mcp.svg)](https://crates.io/crates/obsidian-mcp)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)

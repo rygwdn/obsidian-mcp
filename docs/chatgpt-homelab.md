@@ -312,3 +312,11 @@ visibility. Check the Actions run completed before trying a newly added tag.
 To build locally instead, use
 `docker compose -f compose.yaml -f compose.build.yaml up -d --build` and set
 `OBSIDIAN_IMAGE_TARGET=managed-sync` for the CLI variant (`final` otherwise).
+
+
+## Restrict vault access
+
+Set up a vault-root `mcpignore.md` and/or note frontmatter `mcp_access` in Obsidian.
+The server enforces these restrictions after pre-sync, before reads/searches and
+before mutations. See [vault access controls](vault-access.md). Keep policies
+under your own control; MCP cannot modify them.

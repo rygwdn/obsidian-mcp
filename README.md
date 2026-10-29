@@ -716,3 +716,11 @@ bidirectional pass). Stop any existing continuous-sync process first. See the
 CLI installation, the optional container image, failure recovery and read TTL.
 Default mode is disabled. In managed mode even read operations can upload
 existing local edits as part of bidirectional sync.
+
+### Restrict MCP access from inside Obsidian
+
+Use a vault-root `mcpignore.md` with fenced `mcpignore` glob rules to deny folders
+and files, and note frontmatter `mcp_access: deny` or `mcp_access: read-only` for
+individual Markdown notes. These are enforced access controls; the older ignore
+file only filters indexing. See [vault access controls](docs/vault-access.md) for
+syntax, reload behavior and boundaries.

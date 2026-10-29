@@ -564,4 +564,38 @@ if [ -f download ]; then cp download remote.md; fi
         sync.sync_now(&vault).await.unwrap();
         assert!(!sync.status().pending_upload);
     }
+    #[tokio::test]
+    async fn downloaded_access_policy_is_enforced_before_read_or_write() {
+        let script = r#"
+if [ "$1" = sync-status ]; then printf '{"syncMode":"bidirectional"}'; exit; fi
+cp staged-policy mcpignore.md
+"#;
+        let (dir, vault, sync) = fixture(script, 0, 2000).await;
+        std::fs::write(dir.path().join("secret.md"), "secret bytes").unwrap();
+        std::fs::write(
+            dir.path().join("staged-policy"),
+            "```mcpignore\nsecret.md\n```\n",
+        )
+        .unwrap();
+        assert!(
+            sync.execute(&vault, false, async {
+                let _ = vault.read_note(Path::new("secret.md"))?;
+                Ok(CallToolResult::success(vec![]))
+            })
+            .await
+            .is_err()
+        );
+        assert!(
+            sync.execute(&vault, true, async {
+                vault.write_note(Path::new("secret.md"), "overwrite")?;
+                Ok(CallToolResult::success(vec![]))
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("secret.md")).unwrap(),
+            "secret bytes"
+        );
+    }
 }

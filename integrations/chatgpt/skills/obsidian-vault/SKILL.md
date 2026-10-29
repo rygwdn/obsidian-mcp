@@ -43,3 +43,10 @@ Report that state and retry only sync_now; never repeat the mutation to retry
 an upload. A pre-sync failure means the requested operation did not start.
 Sync is bidirectional housekeeping and may upload existing local edits even
 when the requested operation only reads.
+
+Respect server-enforced vault restrictions. `mcpignore.md` and `mcp_access` are
+managed by the user in Obsidian. Do not try alternate paths, aliases, templates
+or other tools to bypass an access denial. Ask the user to adjust access in
+Obsidian only when the requested work requires a protected note. Do not claim
+that an inaccessible note does not exist. Read-only notes may be read but not
+modified, moved or deleted.

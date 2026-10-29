@@ -80,3 +80,21 @@ account. The official CLI source/README (0.0.14) was inspected for command synta
 configuration modes and locking; live Headless Sync, the optional Node container
 image and homelab deployment remain untested. No personal credentials or vault
 contents were accessed.
+
+## Vault-owned access controls follow-up
+
+Added `mcpignore.md` deny patterns and immutable `mcp_access` permissions with
+filesystem-level checks, protected configuration paths, real-path checks for
+symlinks, template checks and per-operation visible-index refresh. Denied notes
+are omitted from indexes, file statistics and directory listings. The existing
+ignore mechanism remains index-only. See `docs/vault-access.md` for syntax,
+performance implications, concurrency and data-retention boundaries.
+
+Seven added regressions cover read/write/navigation denial, read-only mutation
+protection, access-field immutability, invalid policies, symlink bypasses,
+restricted daily-note templates, policy download before a managed operation,
+and HTTP-level reload/search/list/batch behavior. Final checks: 647 library,
+60 integration, 14 transport and 2 packaging tests pass with the same 18
+previously documented environment exclusions. Formatting, normal Clippy and
+embeddings-api compilation pass. Live homelab behavior and the full local
+embedding/model-download matrix remain untested.

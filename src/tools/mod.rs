@@ -582,9 +582,13 @@ impl ObsidianMcp {
     where
         F: std::future::Future<Output = Result<CallToolResult, ErrorData>>,
     {
+        let guarded = async {
+            self.vault.refresh_after_sync().await?;
+            operation.await
+        };
         match self.vault.headless_sync() {
-            Some(sync) => sync.execute(&self.vault, mutation, operation).await,
-            None => operation.await,
+            Some(sync) => sync.execute(&self.vault, mutation, guarded).await,
+            None => guarded.await,
         }
     }
 

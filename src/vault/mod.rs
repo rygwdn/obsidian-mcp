@@ -3,6 +3,7 @@
 //! Knows nothing about MCP; provides the data model and I/O primitives
 //! that tool handlers delegate to.
 
+pub mod access;
 pub mod exclude;
 pub mod frontmatter;
 pub mod fs;
@@ -324,6 +325,7 @@ impl Vault {
     pub async fn refresh_after_sync(&self) -> VaultResult<()> {
         let vault = self.clone();
         tokio::task::spawn_blocking(move || {
+            access::Policy::load(&vault.inner.root)?;
             let _mutation = vault.lock_mutations()?;
             let mut index = vault.write_index();
             let fresh = VaultIndex::build_sync(&vault.inner.root, &vault.inner.exclude)?;
@@ -507,6 +509,7 @@ impl Vault {
         expected_revision: Option<&str>,
     ) -> VaultResult<()> {
         let _mutation = self.lock_mutations()?;
+        access::check(&self.inner.root, path, true)?;
         fs::check_revision(&self.inner.root, path, expected_revision)?;
         fs::backup_file(&self.inner.root, path)?;
         fs::check_revision(&self.inner.root, path, expected_revision)?;
@@ -533,6 +536,8 @@ impl Vault {
         expected_revision: Option<&str>,
     ) -> VaultResult<PathBuf> {
         let _mutation = self.lock_mutations()?;
+        access::check(&self.inner.root, from, true)?;
+        access::check(&self.inner.root, to, true)?;
         fs::check_revision(&self.inner.root, from, expected_revision)?;
         fs::backup_file(&self.inner.root, from)?;
         fs::check_revision(&self.inner.root, from, expected_revision)?;
@@ -637,6 +642,7 @@ impl Vault {
         self.read_index()
             .notes()
             .keys()
+            .filter(|path| access::readable(&self.inner.root, path))
             .map(|path| path.to_string_lossy().into_owned())
             .collect()
     }
@@ -837,6 +843,7 @@ impl Vault {
             .read_index()
             .notes_with_tag(tag)
             .into_iter()
+            .filter(|note| access::readable(&self.inner.root, &note.path))
             .cloned()
             .collect())
     }
@@ -846,6 +853,7 @@ impl Vault {
             .read_index()
             .notes_with_tag_prefix(tag)
             .into_iter()
+            .filter(|note| access::readable(&self.inner.root, &note.path))
             .cloned()
             .collect())
     }
@@ -859,6 +867,7 @@ impl Vault {
             .read_index()
             .search_frontmatter(field, value)
             .into_iter()
+            .filter(|note| access::readable(&self.inner.root, &note.path))
             .cloned()
             .collect())
     }
@@ -868,6 +877,7 @@ impl Vault {
             .read_index()
             .search_frontmatter_exists(field)
             .into_iter()
+            .filter(|note| access::readable(&self.inner.root, &note.path))
             .cloned()
             .collect())
     }
@@ -881,6 +891,7 @@ impl Vault {
             .read_index()
             .search_frontmatter_contains(field, value)
             .into_iter()
+            .filter(|note| access::readable(&self.inner.root, &note.path))
             .cloned()
             .collect())
     }
@@ -891,6 +902,7 @@ impl Vault {
             .read_index()
             .backlinks_to(&actual_path)
             .into_iter()
+            .filter(|note| access::readable(&self.inner.root, &note.path))
             .cloned()
             .collect())
     }
@@ -918,6 +930,7 @@ impl Vault {
             .read_index()
             .orphan_notes()
             .into_iter()
+            .filter(|note| access::readable(&self.inner.root, &note.path))
             .cloned()
             .collect())
     }
@@ -927,12 +940,12 @@ impl Vault {
     }
 
     pub(crate) fn canonical_existing_relative_path(&self, path: &Path) -> VaultResult<PathBuf> {
-        Ok(path::resolve_existing(&self.inner.root, path)?.relative)
+        access::check(&self.inner.root, path, false)
     }
 
     /// Validate that a relative path doesn't escape the vault root.
     pub fn validate_path(&self, path: &Path) -> VaultResult<()> {
-        fs::resolve_path(&self.inner.root, path)?;
+        access::check(&self.inner.root, path, false)?;
         Ok(())
     }
 
@@ -946,7 +959,7 @@ impl Vault {
         let config = periodic::read_periodic_config(&self.inner.root, period)?;
         let date = date.unwrap_or_else(|| Local::now().date_naive());
         let path = periodic::periodic_note_path(&config, &date)?;
-        fs::read_file(&self.inner.root, &path)
+        self.read_note(&path)
     }
 
     pub fn create_periodic_note(
@@ -959,12 +972,21 @@ impl Vault {
         let config = periodic::read_periodic_config(&self.inner.root, period)?;
         let date = date.unwrap_or_else(|| Local::now().date_naive());
         let path = periodic::periodic_note_path(&config, &date)?;
+        access::check(&self.inner.root, &path, true)?;
 
         let content = if let Some(custom) = content_override {
             custom.to_owned()
         } else {
             match &config.template {
                 Some(tmpl) if !tmpl.is_empty() => {
+                    access::check(&self.inner.root, Path::new(tmpl), false)?;
+                    if Path::new(tmpl).extension().is_none() {
+                        access::check(
+                            &self.inner.root,
+                            &PathBuf::from(format!("{tmpl}.md")),
+                            false,
+                        )?;
+                    }
                     let title = path
                         .file_stem()
                         .and_then(|s| s.to_str())
@@ -992,7 +1014,13 @@ impl Vault {
         limit: usize,
     ) -> VaultResult<Vec<PathBuf>> {
         let config = periodic::read_periodic_config(&self.inner.root, period)?;
-        periodic::list_recent_periodic_notes(&self.inner.root, &config, limit)
+        Ok(
+            periodic::list_recent_periodic_notes(&self.inner.root, &config, usize::MAX)?
+                .into_iter()
+                .filter(|p| access::readable(&self.inner.root, p))
+                .take(limit)
+                .collect(),
+        )
     }
 
     // ── private helpers ────────────────────────────────────────────────
@@ -1024,6 +1052,9 @@ impl Vault {
 
         let mut results = Vec::with_capacity(hits.len());
         for (path, score) in hits {
+            if !access::readable(&self.inner.root, &path) {
+                continue;
+            }
             let matches = match (word_re.as_ref(), fs::read_file(&self.inner.root, &path)) {
                 (Some(re), Ok(content)) if context_len > 0 => re
                     .find_iter(&content)

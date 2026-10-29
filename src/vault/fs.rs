@@ -38,6 +38,9 @@ pub fn resolve_path(vault_root: &Path, relative: &Path) -> VaultResult<PathBuf> 
 
 /// Check if path exists and is a file.
 pub fn file_exists(vault_root: &Path, path: &Path) -> bool {
+    if !super::access::readable(vault_root, path) {
+        return false;
+    }
     vault_path::resolve_existing(vault_root, path)
         .map(|p| p.absolute.is_file())
         .unwrap_or(false)
@@ -45,6 +48,7 @@ pub fn file_exists(vault_root: &Path, path: &Path) -> bool {
 
 /// Get file stat (size, created, modified).
 pub fn file_stat(vault_root: &Path, path: &Path) -> VaultResult<FileStat> {
+    super::access::check(vault_root, path, false)?;
     let abs = vault_path::resolve_existing(vault_root, path)?.absolute;
     let meta = fs::metadata(&abs).map_err(map_not_found(path))?;
 
@@ -66,6 +70,7 @@ pub fn file_stat(vault_root: &Path, path: &Path) -> VaultResult<FileStat> {
 
 /// Read a file's content as a UTF-8 string.
 pub fn read_file(vault_root: &Path, path: &Path) -> VaultResult<String> {
+    super::access::check(vault_root, path, false)?;
     let abs = vault_path::resolve_existing(vault_root, path)?.absolute;
     fs::read_to_string(&abs).map_err(map_not_found(path))
 }
@@ -145,6 +150,7 @@ pub fn write_file_checked(
     content: &str,
     expected: Option<&str>,
 ) -> VaultResult<PathBuf> {
+    super::access::check_content(vault_root, path, content)?;
     let resolved = vault_path::resolve_for_write(vault_root, path)?;
     if let Some(parent) = resolved.absolute.parent() {
         fs::create_dir_all(parent)?;
@@ -172,6 +178,7 @@ pub fn write_file_checked(
 
 /// Create a file without overwriting an existing path, including concurrent creators.
 pub fn create_file(vault_root: &Path, path: &Path, content: &str) -> VaultResult<PathBuf> {
+    super::access::check_content(vault_root, path, content)?;
     let resolved = vault_path::resolve_for_write(vault_root, path)?;
     if let Some(parent) = resolved.absolute.parent() {
         fs::create_dir_all(parent)?;
@@ -190,6 +197,13 @@ pub fn create_file(vault_root: &Path, path: &Path, content: &str) -> VaultResult
 
 /// Append content to a file. Creates the file if it doesn't exist.
 pub fn append_file(vault_root: &Path, path: &Path, content: &str) -> VaultResult<PathBuf> {
+    super::access::check(vault_root, path, true)?;
+    let old = if file_exists(vault_root, path) {
+        read_file(vault_root, path)?
+    } else {
+        String::new()
+    };
+    super::access::check_content(vault_root, path, &format!("{old}{content}"))?;
     let resolved = vault_path::resolve_for_write(vault_root, path)?;
     if let Some(parent) = resolved.absolute.parent() {
         fs::create_dir_all(parent)?;
@@ -204,6 +218,7 @@ pub fn append_file(vault_root: &Path, path: &Path, content: &str) -> VaultResult
 
 /// Delete a file or empty directory.
 pub fn delete_file(vault_root: &Path, path: &Path) -> VaultResult<PathBuf> {
+    super::access::check(vault_root, path, true)?;
     let resolved = vault_path::resolve_existing(vault_root, path)?;
     if resolved.absolute.is_dir() {
         fs::remove_dir(&resolved.absolute).map_err(map_not_found(path))?;
@@ -215,6 +230,14 @@ pub fn delete_file(vault_root: &Path, path: &Path) -> VaultResult<PathBuf> {
 
 /// Move/rename a file. Returns the actual source and destination relative paths.
 pub fn move_file(vault_root: &Path, from: &Path, to: &Path) -> VaultResult<MoveResult> {
+    super::access::check(vault_root, from, true)?;
+    super::access::check(vault_root, to, true)?;
+    let source = vault_path::resolve_existing(vault_root, from)?;
+    if source.absolute.is_dir() {
+        return Err(VaultError::Other(
+            "MCP directory moves are not supported; move individual notes".into(),
+        ));
+    }
     let resolved_from = vault_path::resolve_existing(vault_root, from)?;
     let resolved_to = vault_path::resolve_for_write(vault_root, to)?;
     if resolved_to.absolute.exists() {
@@ -243,6 +266,8 @@ pub fn list_files(
     recursive: bool,
     glob: Option<&str>,
 ) -> VaultResult<Vec<PathBuf>> {
+    let policy = super::access::Policy::load(vault_root)?;
+    policy.check(vault_root, dir, false)?;
     let abs_dir = vault_path::resolve_existing(vault_root, dir)
         .map_err(|err| match err {
             VaultError::NoteNotFound(_) => VaultError::DirectoryNotFound(dir.to_path_buf()),
@@ -274,7 +299,9 @@ pub fn list_files(
         {
             return Ok(());
         }
-        results.push(rel);
+        if policy.check(vault_root, &rel, false).is_ok() {
+            results.push(rel);
+        }
         Ok(())
     };
 
@@ -287,6 +314,9 @@ pub fn list_files(
                     .to_str()
                     .map(|name| !is_hidden(name))
                     .unwrap_or(false)
+                    && e.path()
+                        .strip_prefix(&canonical_root)
+                        .is_ok_and(|p| policy.check(vault_root, p, false).is_ok())
             })
         {
             let entry = entry.map_err(|e| VaultError::Io(std::io::Error::other(e.to_string())))?;

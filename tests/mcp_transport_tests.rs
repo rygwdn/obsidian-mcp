@@ -1022,3 +1022,77 @@ if [ "$n" = 3 ]; then touch fail; exit 7; fi
     );
     server.stop().await;
 }
+
+#[tokio::test]
+async fn access_policy_reloads_and_blocks_tools_without_leaking_denied_notes() {
+    let server = HttpServer::start("full").await;
+    let call = async |name: &str, arguments: Value| {
+        rpc_response(
+            server
+                .request(
+                    "tools/call",
+                    json!({"name":name,"arguments":arguments}),
+                    MODERN,
+                )
+                .send()
+                .await
+                .unwrap(),
+        )
+        .await
+    };
+    // Initially indexed, then denied externally without a watcher or restart.
+    assert!(call("note_read", json!({"path":"note.md"})).await["result"].is_object());
+    std::fs::write(
+        server.vault.path().join("mcpignore.md"),
+        "# My policy\n```mcpignore\nnote.md\nPrivate/\n```\n",
+    )
+    .unwrap();
+    for (name, args) in [
+        ("note_read", json!({"path":"note.md"})),
+        (
+            "note_write",
+            json!({"path":"note.md","content":"overwrite"}),
+        ),
+        (
+            "note_create",
+            json!({"path":"Private/new.md","content":"new"}),
+        ),
+        ("note_inspect", json!({"path":"note.md"})),
+        ("frontmatter", json!({"path":"note.md","action":"get"})),
+        ("note_move", json!({"from":"note.md","to":"stolen.md"})),
+        ("note_write", json!({"path":"mcpignore.md","content":""})),
+    ] {
+        let result = call(name, args).await;
+        assert!(
+            result.get("error").is_some() || result["result"]["isError"] == true,
+            "{name}: {result}"
+        );
+        assert!(!result.to_string().contains("A note served"));
+    }
+    for (name, args) in [
+        ("vault_list", json!({"recursive":true})),
+        ("vault_list", json!({"format":"tree"})),
+        ("search_text", json!({"query":"Transport"})),
+        ("search_regex", json!({"pattern":"Transport"})),
+        ("search_metadata", json!({"type":"tag","tag":"hidden"})),
+        ("wikilinks", json!({"query":"orphans"})),
+    ] {
+        let result = call(name, args).await;
+        assert!(result.get("error").is_none(), "{name}: {result}");
+        assert!(!result.to_string().contains("note.md"), "{name}: {result}");
+        assert!(
+            !result.to_string().contains("mcpignore.md"),
+            "{name}: {result}"
+        );
+    }
+    let batch = call("note_read_many", json!({"paths":["note.md"]})).await;
+    assert!(batch.get("error").is_some() || batch["result"]["isError"] == true);
+    assert!(!batch.to_string().contains("A note served"));
+    assert_eq!(
+        std::fs::read_to_string(server.vault.path().join("note.md")).unwrap(),
+        NOTE
+    );
+    std::fs::remove_file(server.vault.path().join("mcpignore.md")).unwrap();
+    assert_eq!(call("search_text",json!({"query":"Transport"})).await["result"]["structuredContent"]["results"].as_array().unwrap().len(),1);
+    server.stop().await;
+}

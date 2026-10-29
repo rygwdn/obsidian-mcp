@@ -1,0 +1,8 @@
+# Optional local build: docker compose -f compose.yaml -f compose.build.yaml up -d --build
+services:
+  obsidian-mcp:
+    build:
+      context: ../..
+      dockerfile: deploy/remote/Dockerfile
+      target: ${OBSIDIAN_IMAGE_TARGET:-final}
+    pull_policy: build

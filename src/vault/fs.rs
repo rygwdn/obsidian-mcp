@@ -38,6 +38,9 @@ pub fn resolve_path(vault_root: &Path, relative: &Path) -> VaultResult<PathBuf> 
 
 /// Check if path exists and is a file.
 pub fn file_exists(vault_root: &Path, path: &Path) -> bool {
+    if !super::access::readable(vault_root, path) {
+        return false;
+    }
     vault_path::resolve_existing(vault_root, path)
         .map(|p| p.absolute.is_file())
         .unwrap_or(false)
@@ -45,6 +48,7 @@ pub fn file_exists(vault_root: &Path, path: &Path) -> bool {
 
 /// Get file stat (size, created, modified).
 pub fn file_stat(vault_root: &Path, path: &Path) -> VaultResult<FileStat> {
+    super::access::check(vault_root, path, false)?;
     let abs = vault_path::resolve_existing(vault_root, path)?.absolute;
     let meta = fs::metadata(&abs).map_err(map_not_found(path))?;
 
@@ -66,22 +70,115 @@ pub fn file_stat(vault_root: &Path, path: &Path) -> VaultResult<FileStat> {
 
 /// Read a file's content as a UTF-8 string.
 pub fn read_file(vault_root: &Path, path: &Path) -> VaultResult<String> {
+    super::access::check(vault_root, path, false)?;
     let abs = vault_path::resolve_existing(vault_root, path)?.absolute;
     fs::read_to_string(&abs).map_err(map_not_found(path))
 }
 
 /// Write content to a file (creates parent dirs if needed). Overwrites if exists.
 pub fn write_file(vault_root: &Path, path: &Path, content: &str) -> VaultResult<PathBuf> {
+    write_file_checked(vault_root, path, content, None)
+}
+
+/// Hash the exact bytes of a note; stable across machines and independent of mtimes.
+pub fn revision(content: &str) -> String {
+    bytes_revision(content.as_bytes())
+}
+
+fn bytes_revision(content: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(content)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+pub fn check_revision(vault_root: &Path, path: &Path, expected: Option<&str>) -> VaultResult<()> {
+    if let Some(expected) = expected {
+        let content = read_file(vault_root, path)?;
+        if revision(&content) != expected {
+            return Err(VaultError::RevisionConflict {
+                path: path.to_path_buf(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Optional content-addressed recovery copies. The directory must be outside the vault.
+pub fn backup_file(vault_root: &Path, path: &Path) -> VaultResult<()> {
+    let Some(directory) = std::env::var_os("OBSIDIAN_BACKUP_DIR") else {
+        return Ok(());
+    };
+    backup_file_to(vault_root, path, &PathBuf::from(directory))
+}
+
+fn backup_file_to(vault_root: &Path, path: &Path, directory: &Path) -> VaultResult<()> {
+    fs::create_dir_all(directory)?;
+    let directory = directory.canonicalize()?;
+    if directory.starts_with(vault_root.canonicalize()?) {
+        return Err(VaultError::InvalidPath(
+            "OBSIDIAN_BACKUP_DIR must be outside the vault".into(),
+        ));
+    }
+    let resolved = vault_path::resolve_existing(vault_root, path)?;
+    let content = fs::read(&resolved.absolute)?;
+    let name = revision(&resolved.relative.to_string_lossy());
+    let folder = directory.join(name);
+    fs::create_dir_all(&folder)?;
+    fs::write(
+        folder.join("path.txt"),
+        resolved.relative.to_string_lossy().as_bytes(),
+    )?;
+    let saved = folder.join(format!("{}.md", bytes_revision(&content)));
+    let mut staged = tempfile::NamedTempFile::new_in(&folder)?;
+    staged.write_all(&content)?;
+    staged.as_file().sync_all()?;
+    match staged.persist_noclobber(saved) {
+        Ok(_) => {}
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.error.into()),
+    }
+    Ok(())
+}
+
+/// Stage a complete write and atomically replace the destination. External
+/// Sync does not share our lock; a narrow final-check/rename race remains.
+pub fn write_file_checked(
+    vault_root: &Path,
+    path: &Path,
+    content: &str,
+    expected: Option<&str>,
+) -> VaultResult<PathBuf> {
+    super::access::check_content(vault_root, path, content)?;
     let resolved = vault_path::resolve_for_write(vault_root, path)?;
     if let Some(parent) = resolved.absolute.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&resolved.absolute, content)?;
+    check_revision(vault_root, path, expected)?;
+    if resolved.absolute.exists() {
+        backup_file(vault_root, path)?;
+    }
+    let parent = resolved
+        .absolute
+        .parent()
+        .ok_or_else(|| VaultError::InvalidPath("note has no parent".into()))?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    if let Ok(metadata) = fs::metadata(&resolved.absolute) {
+        staged.as_file().set_permissions(metadata.permissions())?;
+    }
+    staged.write_all(content.as_bytes())?;
+    staged.as_file().sync_all()?;
+    check_revision(vault_root, path, expected)?;
+    staged
+        .persist(&resolved.absolute)
+        .map_err(|error| error.error)?;
     Ok(resolved.relative)
 }
 
 /// Create a file without overwriting an existing path, including concurrent creators.
 pub fn create_file(vault_root: &Path, path: &Path, content: &str) -> VaultResult<PathBuf> {
+    super::access::check_content(vault_root, path, content)?;
     let resolved = vault_path::resolve_for_write(vault_root, path)?;
     if let Some(parent) = resolved.absolute.parent() {
         fs::create_dir_all(parent)?;
@@ -100,6 +197,13 @@ pub fn create_file(vault_root: &Path, path: &Path, content: &str) -> VaultResult
 
 /// Append content to a file. Creates the file if it doesn't exist.
 pub fn append_file(vault_root: &Path, path: &Path, content: &str) -> VaultResult<PathBuf> {
+    super::access::check(vault_root, path, true)?;
+    let old = if file_exists(vault_root, path) {
+        read_file(vault_root, path)?
+    } else {
+        String::new()
+    };
+    super::access::check_content(vault_root, path, &format!("{old}{content}"))?;
     let resolved = vault_path::resolve_for_write(vault_root, path)?;
     if let Some(parent) = resolved.absolute.parent() {
         fs::create_dir_all(parent)?;
@@ -114,6 +218,7 @@ pub fn append_file(vault_root: &Path, path: &Path, content: &str) -> VaultResult
 
 /// Delete a file or empty directory.
 pub fn delete_file(vault_root: &Path, path: &Path) -> VaultResult<PathBuf> {
+    super::access::check(vault_root, path, true)?;
     let resolved = vault_path::resolve_existing(vault_root, path)?;
     if resolved.absolute.is_dir() {
         fs::remove_dir(&resolved.absolute).map_err(map_not_found(path))?;
@@ -125,6 +230,14 @@ pub fn delete_file(vault_root: &Path, path: &Path) -> VaultResult<PathBuf> {
 
 /// Move/rename a file. Returns the actual source and destination relative paths.
 pub fn move_file(vault_root: &Path, from: &Path, to: &Path) -> VaultResult<MoveResult> {
+    super::access::check(vault_root, from, true)?;
+    super::access::check(vault_root, to, true)?;
+    let source = vault_path::resolve_existing(vault_root, from)?;
+    if source.absolute.is_dir() {
+        return Err(VaultError::Other(
+            "MCP directory moves are not supported; move individual notes".into(),
+        ));
+    }
     let resolved_from = vault_path::resolve_existing(vault_root, from)?;
     let resolved_to = vault_path::resolve_for_write(vault_root, to)?;
     if resolved_to.absolute.exists() {
@@ -153,6 +266,8 @@ pub fn list_files(
     recursive: bool,
     glob: Option<&str>,
 ) -> VaultResult<Vec<PathBuf>> {
+    let policy = super::access::Policy::load(vault_root)?;
+    policy.check(vault_root, dir, false)?;
     let abs_dir = vault_path::resolve_existing(vault_root, dir)
         .map_err(|err| match err {
             VaultError::NoteNotFound(_) => VaultError::DirectoryNotFound(dir.to_path_buf()),
@@ -184,7 +299,9 @@ pub fn list_files(
         {
             return Ok(());
         }
-        results.push(rel);
+        if policy.check(vault_root, &rel, false).is_ok() {
+            results.push(rel);
+        }
         Ok(())
     };
 
@@ -197,6 +314,9 @@ pub fn list_files(
                     .to_str()
                     .map(|name| !is_hidden(name))
                     .unwrap_or(false)
+                    && e.path()
+                        .strip_prefix(&canonical_root)
+                        .is_ok_and(|p| policy.check(vault_root, p, false).is_ok())
             })
         {
             let entry = entry.map_err(|e| VaultError::Io(std::io::Error::other(e.to_string())))?;
@@ -608,5 +728,35 @@ mod tests {
             read_file(dir.path(), Path::new("new.md")).unwrap(),
             format!("author-{}", winners[0])
         );
+    }
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::*;
+
+    #[test]
+    fn backs_up_exact_bytes_outside_the_vault() {
+        let root = tempfile::tempdir().unwrap();
+        let backups = tempfile::tempdir().unwrap();
+        let path = Path::new("note.md");
+        let original = "---\r\ntags: [test]\r\n---\r\n# hello\r\n";
+        create_file(root.path(), path, original).unwrap();
+        backup_file_to(root.path(), path, backups.path()).unwrap();
+        backup_file_to(root.path(), path, backups.path()).unwrap();
+        let folder = backups.path().join(revision("note.md"));
+        assert_eq!(
+            fs::read_to_string(folder.join("path.txt")).unwrap(),
+            "note.md"
+        );
+        assert_eq!(
+            fs::read(folder.join(format!("{}.md", revision(original)))).unwrap(),
+            original.as_bytes()
+        );
+        assert!(backup_file_to(root.path(), path, &root.path().join("bad-backups")).is_err());
+        write_file_checked(root.path(), path, "replacement", Some(&revision(original))).unwrap();
+        assert_eq!(read_file(root.path(), path).unwrap(), "replacement");
+        assert!(write_file_checked(root.path(), path, "stale", Some(&revision(original))).is_err());
+        assert_eq!(read_file(root.path(), path).unwrap(), "replacement");
     }
 }

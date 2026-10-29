@@ -3,6 +3,7 @@
 //! Knows nothing about MCP; provides the data model and I/O primitives
 //! that tool handlers delegate to.
 
+pub mod access;
 pub mod exclude;
 pub mod frontmatter;
 pub mod fs;
@@ -52,6 +53,7 @@ type EmbeddingLoaderFuture = ();
 
 /// Internal shared state wrapped in `Arc` for cheap cloning.
 struct VaultInner {
+    headless_sync: Option<Arc<crate::headless_sync::SyncCoordinator>>,
     root: PathBuf,
     mcp_home: PathBuf,
     mcp_data: PathBuf,
@@ -188,6 +190,16 @@ impl Vault {
         }
 
         let vi = VaultIndex::build(&root, Arc::clone(&exclude)).await?;
+        let headless_sync = crate::headless_sync::SyncConfig::from_env()
+            .map_err(VaultError::Other)?
+            .map(|settings| {
+                Arc::new(crate::headless_sync::SyncCoordinator::new(
+                    settings,
+                    root.clone(),
+                    &mcp_data,
+                    &mcp_home,
+                ))
+            });
 
         let tantivy = if config.tantivy {
             let tv = TantivyIndex::build(&root, vi.notes())?;
@@ -255,6 +267,7 @@ impl Vault {
 
         Ok(Self {
             inner: Arc::new(VaultInner {
+                headless_sync,
                 root,
                 mcp_home,
                 mcp_data,
@@ -304,6 +317,53 @@ impl Vault {
         &self.inner.root
     }
 
+    pub fn headless_sync(&self) -> Option<&Arc<crate::headless_sync::SyncCoordinator>> {
+        self.inner.headless_sync.as_ref()
+    }
+
+    /// Explicit barrier after a one-shot sync; do not rely on watcher debounce.
+    pub async fn refresh_after_sync(&self) -> VaultResult<()> {
+        let vault = self.clone();
+        tokio::task::spawn_blocking(move || {
+            access::Policy::load(&vault.inner.root)?;
+            let _mutation = vault.lock_mutations()?;
+            let mut index = vault.write_index();
+            let fresh = VaultIndex::build_sync(&vault.inner.root, &vault.inner.exclude)?;
+            if let Some(tv) = &vault.inner.tantivy {
+                for path in index
+                    .notes()
+                    .keys()
+                    .filter(|path| !fresh.notes().contains_key(*path))
+                {
+                    tv.remove_file_batch(path)?;
+                }
+                for (path, note) in fresh.notes() {
+                    tv.reindex_file_batch(&vault.inner.root, path, note)?;
+                }
+                tv.flush()?;
+            }
+            #[cfg(has_embeddings)]
+            if let Some(runtime) = &vault.inner.embedding_runtime {
+                for path in index
+                    .notes()
+                    .keys()
+                    .filter(|path| !fresh.notes().contains_key(*path))
+                {
+                    runtime.submit_remove(path);
+                }
+                for (path, note) in fresh.notes() {
+                    if index.get_note(path) != Some(note) {
+                        runtime.submit_upsert(path);
+                    }
+                }
+            }
+            *index = fresh;
+            Ok(())
+        })
+        .await
+        .map_err(|error| VaultError::Other(format!("Sync index-refresh task failed: {error}")))?
+    }
+
     /// Always `{vault_root}/.obsidian-mcp`. Auto-created on startup.
     pub fn mcp_home(&self) -> &Path {
         &self.inner.mcp_home
@@ -344,22 +404,44 @@ impl Vault {
     }
 
     pub fn write_note(&self, path: &Path, content: &str) -> VaultResult<()> {
+        self.write_note_checked(path, content, None)
+    }
+
+    pub fn write_note_checked(
+        &self,
+        path: &Path,
+        content: &str,
+        expected_revision: Option<&str>,
+    ) -> VaultResult<()> {
         let _mutation = self.lock_mutations()?;
+        fs::check_revision(&self.inner.root, path, expected_revision)?;
         frontmatter::parse_frontmatter(content)?;
-        let actual_path = fs::write_file(&self.inner.root, path, content)?;
+        let actual_path =
+            fs::write_file_checked(&self.inner.root, path, content, expected_revision)?;
         self.reindex(&actual_path)?;
         Ok(())
     }
 
     pub fn append_note(&self, path: &Path, content: &str) -> VaultResult<()> {
+        self.append_note_checked(path, content, None)
+    }
+
+    pub fn append_note_checked(
+        &self,
+        path: &Path,
+        content: &str,
+        expected_revision: Option<&str>,
+    ) -> VaultResult<()> {
         let _mutation = self.lock_mutations()?;
+        fs::check_revision(&self.inner.root, path, expected_revision)?;
         let combined = match fs::read_file(&self.inner.root, path) {
             Ok(existing) => existing + content,
             Err(VaultError::NoteNotFound(_)) => content.to_owned(),
             Err(error) => return Err(error),
         };
         frontmatter::parse_frontmatter(&combined)?;
-        let actual_path = fs::append_file(&self.inner.root, path, content)?;
+        let actual_path =
+            fs::write_file_checked(&self.inner.root, path, &combined, expected_revision)?;
         self.reindex(&actual_path)?;
         Ok(())
     }
@@ -390,7 +472,17 @@ impl Vault {
 
     /// Prepend content after frontmatter (or at the start if none exists).
     pub fn prepend_note(&self, path: &Path, content: &str) -> VaultResult<()> {
+        self.prepend_note_checked(path, content, None)
+    }
+
+    pub fn prepend_note_checked(
+        &self,
+        path: &Path,
+        content: &str,
+        expected_revision: Option<&str>,
+    ) -> VaultResult<()> {
         let _mutation = self.lock_mutations()?;
+        fs::check_revision(&self.inner.root, path, expected_revision)?;
         let existing = fs::read_file(&self.inner.root, path)?;
         let new_content = match frontmatter::extract_raw_frontmatter(&existing) {
             Some((_, body_start)) => {
@@ -403,13 +495,26 @@ impl Vault {
             None => format!("{content}{existing}"),
         };
         frontmatter::parse_frontmatter(&new_content)?;
-        let actual_path = fs::write_file(&self.inner.root, path, &new_content)?;
+        let actual_path =
+            fs::write_file_checked(&self.inner.root, path, &new_content, expected_revision)?;
         self.reindex(&actual_path)?;
         Ok(())
     }
 
     pub fn delete_note(&self, path: &Path) -> VaultResult<()> {
+        self.delete_note_checked(path, None)
+    }
+
+    pub fn delete_note_checked(
+        &self,
+        path: &Path,
+        expected_revision: Option<&str>,
+    ) -> VaultResult<()> {
         let _mutation = self.lock_mutations()?;
+        access::check(&self.inner.root, path, true)?;
+        fs::check_revision(&self.inner.root, path, expected_revision)?;
+        fs::backup_file(&self.inner.root, path)?;
+        fs::check_revision(&self.inner.root, path, expected_revision)?;
         let actual_path = fs::delete_file(&self.inner.root, path)?;
         self.write_index().remove_file(&actual_path);
         if let Some(tv) = &self.inner.tantivy {
@@ -423,7 +528,21 @@ impl Vault {
     }
 
     pub fn move_note(&self, from: &Path, to: &Path) -> VaultResult<PathBuf> {
+        self.move_note_checked(from, to, None)
+    }
+
+    pub fn move_note_checked(
+        &self,
+        from: &Path,
+        to: &Path,
+        expected_revision: Option<&str>,
+    ) -> VaultResult<PathBuf> {
         let _mutation = self.lock_mutations()?;
+        access::check(&self.inner.root, from, true)?;
+        access::check(&self.inner.root, to, true)?;
+        fs::check_revision(&self.inner.root, from, expected_revision)?;
+        fs::backup_file(&self.inner.root, from)?;
+        fs::check_revision(&self.inner.root, from, expected_revision)?;
         let move_result = fs::move_file(&self.inner.root, from, to)?;
         let old_path = move_result.from;
         let new_path = move_result.to;
@@ -444,11 +563,22 @@ impl Vault {
     // ── patch delegation ───────────────────────────────────────────────
 
     pub fn patch_note(&self, path: &Path, request: &PatchRequest) -> VaultResult<()> {
+        self.patch_note_checked(path, request, None)
+    }
+
+    pub fn patch_note_checked(
+        &self,
+        path: &Path,
+        request: &PatchRequest,
+        expected_revision: Option<&str>,
+    ) -> VaultResult<()> {
         let _mutation = self.lock_mutations()?;
+        fs::check_revision(&self.inner.root, path, expected_revision)?;
         let content = fs::read_file(&self.inner.root, path)?;
         let patched = patch::apply_patch(&content, request, path)?;
         frontmatter::parse_frontmatter(&patched)?;
-        let actual_path = fs::write_file(&self.inner.root, path, &patched)?;
+        let actual_path =
+            fs::write_file_checked(&self.inner.root, path, &patched, expected_revision)?;
         self.reindex(&actual_path)?;
         Ok(())
     }
@@ -466,21 +596,44 @@ impl Vault {
         key: &str,
         value: serde_json::Value,
     ) -> VaultResult<()> {
+        self.set_frontmatter_field_checked(path, key, value, None)
+    }
+
+    pub fn set_frontmatter_field_checked(
+        &self,
+        path: &Path,
+        key: &str,
+        value: serde_json::Value,
+        expected_revision: Option<&str>,
+    ) -> VaultResult<()> {
         let _mutation = self.lock_mutations()?;
+        fs::check_revision(&self.inner.root, path, expected_revision)?;
         let content = fs::read_file(&self.inner.root, path)?;
         let updated = frontmatter::set_frontmatter_field(&content, key, value)?;
         frontmatter::parse_frontmatter(&updated)?;
-        let actual_path = fs::write_file(&self.inner.root, path, &updated)?;
+        let actual_path =
+            fs::write_file_checked(&self.inner.root, path, &updated, expected_revision)?;
         self.reindex(&actual_path)?;
         Ok(())
     }
 
     pub fn remove_frontmatter_field(&self, path: &Path, key: &str) -> VaultResult<()> {
+        self.remove_frontmatter_field_checked(path, key, None)
+    }
+
+    pub fn remove_frontmatter_field_checked(
+        &self,
+        path: &Path,
+        key: &str,
+        expected_revision: Option<&str>,
+    ) -> VaultResult<()> {
         let _mutation = self.lock_mutations()?;
+        fs::check_revision(&self.inner.root, path, expected_revision)?;
         let content = fs::read_file(&self.inner.root, path)?;
         let updated = frontmatter::remove_frontmatter_field(&content, key)?;
         frontmatter::parse_frontmatter(&updated)?;
-        let actual_path = fs::write_file(&self.inner.root, path, &updated)?;
+        let actual_path =
+            fs::write_file_checked(&self.inner.root, path, &updated, expected_revision)?;
         self.reindex(&actual_path)?;
         Ok(())
     }
@@ -491,6 +644,7 @@ impl Vault {
         self.read_index()
             .notes()
             .keys()
+            .filter(|path| access::readable(&self.inner.root, path))
             .map(|path| path.to_string_lossy().into_owned())
             .collect()
     }
@@ -691,6 +845,7 @@ impl Vault {
             .read_index()
             .notes_with_tag(tag)
             .into_iter()
+            .filter(|note| access::readable(&self.inner.root, &note.path))
             .cloned()
             .collect())
     }
@@ -700,6 +855,7 @@ impl Vault {
             .read_index()
             .notes_with_tag_prefix(tag)
             .into_iter()
+            .filter(|note| access::readable(&self.inner.root, &note.path))
             .cloned()
             .collect())
     }
@@ -713,6 +869,7 @@ impl Vault {
             .read_index()
             .search_frontmatter(field, value)
             .into_iter()
+            .filter(|note| access::readable(&self.inner.root, &note.path))
             .cloned()
             .collect())
     }
@@ -722,6 +879,7 @@ impl Vault {
             .read_index()
             .search_frontmatter_exists(field)
             .into_iter()
+            .filter(|note| access::readable(&self.inner.root, &note.path))
             .cloned()
             .collect())
     }
@@ -735,6 +893,7 @@ impl Vault {
             .read_index()
             .search_frontmatter_contains(field, value)
             .into_iter()
+            .filter(|note| access::readable(&self.inner.root, &note.path))
             .cloned()
             .collect())
     }
@@ -745,6 +904,7 @@ impl Vault {
             .read_index()
             .backlinks_to(&actual_path)
             .into_iter()
+            .filter(|note| access::readable(&self.inner.root, &note.path))
             .cloned()
             .collect())
     }
@@ -772,6 +932,7 @@ impl Vault {
             .read_index()
             .orphan_notes()
             .into_iter()
+            .filter(|note| access::readable(&self.inner.root, &note.path))
             .cloned()
             .collect())
     }
@@ -781,12 +942,12 @@ impl Vault {
     }
 
     pub(crate) fn canonical_existing_relative_path(&self, path: &Path) -> VaultResult<PathBuf> {
-        Ok(path::resolve_existing(&self.inner.root, path)?.relative)
+        access::check(&self.inner.root, path, false)
     }
 
     /// Validate that a relative path doesn't escape the vault root.
     pub fn validate_path(&self, path: &Path) -> VaultResult<()> {
-        fs::resolve_path(&self.inner.root, path)?;
+        access::check(&self.inner.root, path, false)?;
         Ok(())
     }
 
@@ -800,7 +961,7 @@ impl Vault {
         let config = periodic::read_periodic_config(&self.inner.root, period)?;
         let date = date.unwrap_or_else(|| Local::now().date_naive());
         let path = periodic::periodic_note_path(&config, &date)?;
-        fs::read_file(&self.inner.root, &path)
+        self.read_note(&path)
     }
 
     pub fn create_periodic_note(
@@ -813,12 +974,21 @@ impl Vault {
         let config = periodic::read_periodic_config(&self.inner.root, period)?;
         let date = date.unwrap_or_else(|| Local::now().date_naive());
         let path = periodic::periodic_note_path(&config, &date)?;
+        access::check(&self.inner.root, &path, true)?;
 
         let content = if let Some(custom) = content_override {
             custom.to_owned()
         } else {
             match &config.template {
                 Some(tmpl) if !tmpl.is_empty() => {
+                    access::check(&self.inner.root, Path::new(tmpl), false)?;
+                    if Path::new(tmpl).extension().is_none() {
+                        access::check(
+                            &self.inner.root,
+                            &PathBuf::from(format!("{tmpl}.md")),
+                            false,
+                        )?;
+                    }
                     let title = path
                         .file_stem()
                         .and_then(|s| s.to_str())
@@ -846,7 +1016,13 @@ impl Vault {
         limit: usize,
     ) -> VaultResult<Vec<PathBuf>> {
         let config = periodic::read_periodic_config(&self.inner.root, period)?;
-        periodic::list_recent_periodic_notes(&self.inner.root, &config, limit)
+        Ok(
+            periodic::list_recent_periodic_notes(&self.inner.root, &config, usize::MAX)?
+                .into_iter()
+                .filter(|p| access::readable(&self.inner.root, p))
+                .take(limit)
+                .collect(),
+        )
     }
 
     // ── private helpers ────────────────────────────────────────────────
@@ -878,6 +1054,9 @@ impl Vault {
 
         let mut results = Vec::with_capacity(hits.len());
         for (path, score) in hits {
+            if !access::readable(&self.inner.root, &path) {
+                continue;
+            }
             let matches = match (word_re.as_ref(), fs::read_file(&self.inner.root, &path)) {
                 (Some(re), Ok(content)) if context_len > 0 => re
                     .find_iter(&content)
@@ -2090,6 +2269,52 @@ mod tests {
 
     #[cfg(has_embeddings)]
     #[tokio::test]
+    async fn access_refresh_does_not_requeue_unchanged_embeddings() {
+        let dir = tempfile::tempdir().unwrap();
+        create_test_vault(dir.path());
+        std::fs::write(dir.path().join("note.md"), "original").unwrap();
+        let model = Arc::new(TestEmbedder::new());
+        let loader_model = Arc::clone(&model);
+        let loader: EmbeddingLoaderFuture =
+            Box::pin(async move { Ok(loader_model as Arc<dyn embeddings::Embedder>) });
+        let vault = Vault::open_with_embedding_loader(&embedding_config(dir.path()), Some(loader))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !vault
+                .embedding_status()
+                .is_some_and(|s| s.phase == embedding_runtime::EmbeddingPhase::Ready)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for _ in 0..3 {
+            vault.refresh_after_sync().await.unwrap();
+            let status = vault.embedding_status().unwrap();
+            assert_eq!(status.phase, embedding_runtime::EmbeddingPhase::Ready);
+            assert_eq!(status.pending_notes, 0);
+        }
+        assert_eq!(model.inputs.lock().unwrap().len(), 1);
+        std::fs::write(
+            dir.path().join("note.md"),
+            "changed content with a different size",
+        )
+        .unwrap();
+        vault.refresh_after_sync().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while model.inputs.lock().unwrap().len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(model.inputs.lock().unwrap().len(), 2);
+    }
+
+    #[cfg(has_embeddings)]
+    #[tokio::test]
     async fn local_semantic_search_filters_paths_removed_from_primary_index() {
         let dir = tempfile::tempdir().unwrap();
         create_test_vault(dir.path());
@@ -2532,5 +2757,92 @@ mod tests {
         assert!(vault.search_by_tag("work/inbox").unwrap().is_empty());
         vault.delete_note(Path::new("a.md")).unwrap();
         assert!(vault.search_by_tag("work").unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::*;
+    use crate::test_helpers::test_config;
+
+    #[tokio::test]
+    async fn stale_edits_do_not_clobber_sync_or_other_handles() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::open(&test_config(directory.path())).await.unwrap();
+        let path = Path::new("revision.md");
+        vault.create_note(path, "# Log\noriginal\n", None).unwrap();
+        let revision = fs::revision(&vault.read_note(path).unwrap());
+        std::fs::write(directory.path().join(path), "# Log\nexternal sync\n").unwrap();
+        assert!(matches!(
+            vault.write_note_checked(path, "bad", Some(&revision)),
+            Err(VaultError::RevisionConflict { .. })
+        ));
+        assert!(matches!(
+            vault.append_note_checked(path, "bad", Some(&revision)),
+            Err(VaultError::RevisionConflict { .. })
+        ));
+        assert!(matches!(
+            vault.delete_note_checked(path, Some(&revision)),
+            Err(VaultError::RevisionConflict { .. })
+        ));
+        assert!(matches!(
+            vault.move_note_checked(path, Path::new("moved.md"), Some(&revision)),
+            Err(VaultError::RevisionConflict { .. })
+        ));
+        assert!(matches!(
+            vault.set_frontmatter_field_checked(
+                path,
+                "status",
+                serde_json::json!("bad"),
+                Some(&revision)
+            ),
+            Err(VaultError::RevisionConflict { .. })
+        ));
+        assert_eq!(vault.read_note(path).unwrap(), "# Log\nexternal sync\n");
+        let current = fs::revision(&vault.read_note(path).unwrap());
+        vault
+            .append_note_checked(path, "appended\n", Some(&current))
+            .unwrap();
+        assert!(
+            vault
+                .append_note_checked(path, "duplicate\n", Some(&current))
+                .is_err()
+        );
+        assert_eq!(
+            vault.read_note(path).unwrap(),
+            "# Log\nexternal sync\nappended\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn simultaneous_revision_checked_writers_have_one_winner() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::open(&test_config(directory.path())).await.unwrap();
+        vault
+            .create_note(Path::new("race.md"), "original", None)
+            .unwrap();
+        let revision = fs::revision("original");
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = ["one", "two"]
+            .into_iter()
+            .map(|text| {
+                let vault = vault.clone();
+                let revision = revision.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    vault.write_note_checked(Path::new("race.md"), text, Some(&revision))
+                })
+            })
+            .collect();
+        let outcomes: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|result| matches!(result, Err(VaultError::RevisionConflict { .. })))
+                .count(),
+            1
+        );
     }
 }

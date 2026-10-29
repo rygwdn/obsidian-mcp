@@ -55,7 +55,8 @@ impl VaultIndex {
             .map_err(|e| VaultError::Other(format!("index build task panicked: {e}")))?
     }
 
-    fn build_sync(vault_root: &Path, exclude: &ExcludeSet) -> VaultResult<Self> {
+    pub(crate) fn build_sync(vault_root: &Path, exclude: &ExcludeSet) -> VaultResult<Self> {
+        let policy = super::access::Policy::load(vault_root)?;
         let mut notes = HashMap::new();
         let mut tags: HashMap<String, HashSet<PathBuf>> = HashMap::new();
         let mut non_md_file_count: usize = 0;
@@ -65,7 +66,13 @@ impl VaultIndex {
         let walker = WalkDir::new(vault_root)
             .min_depth(1)
             .into_iter()
-            .filter_entry(|e| super::exclude::is_visible_path(Path::new(e.file_name())));
+            .filter_entry(|e| {
+                super::exclude::is_visible_path(Path::new(e.file_name()))
+                    && (!e.file_type().is_dir()
+                        || e.path()
+                            .strip_prefix(vault_root)
+                            .is_ok_and(|p| policy.check(vault_root, p, false).is_ok()))
+            });
 
         for entry in walker {
             let entry = entry.map_err(|e| match e.into_io_error() {
@@ -79,6 +86,10 @@ impl VaultIndex {
 
             let abs_path = entry.path();
             let rel_path = vault_path::relative_from_absolute(vault_root, abs_path)?;
+
+            if policy.check(vault_root, &rel_path, false).is_err() {
+                continue;
+            }
 
             let is_md = abs_path
                 .extension()
@@ -206,7 +217,9 @@ impl VaultIndex {
         exclude: &ExcludeSet,
         tantivy: Option<&super::tantivy_index::TantivyIndex>,
     ) -> VaultResult<()> {
-        let result = if !super::exclude::is_visible_path(path) {
+        let result = if !super::exclude::is_visible_path(path)
+            || !super::access::readable(vault_root, path)
+        {
             self.remove_file(path);
             Ok(())
         } else {
